@@ -289,6 +289,7 @@
   .sp-adjust{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
   .sp-adjust.hidden{display:none}
   .sa-lbl{font-size:12px;color:var(--muted);font-weight:600}
+  .sa-blue{color:var(--brand);font-weight:700}
   /* 小结文本内可编辑数字 */
   .sn-num{color:var(--brand);font-weight:700;cursor:pointer;border-bottom:1px dashed var(--brand);padding:0 2px}
   .sn-num:hover{background:var(--brand-soft)}
@@ -2438,7 +2439,7 @@ function renderSummaryPanel() {
     if (sf) sf.onchange = () => { state.sumFrom = sf.value || state.sumFrom; renderSummaryPanel(); };
     if (stEl) stEl.onchange = () => { state.sumTo = stEl.value || state.sumTo; renderSummaryPanel(); };
   }
-  // 文案：小结文本内直接编辑（第2行原因数字=可点击的橙色数字，点击原地变输入框）
+  // 文案：小结文本内直接编辑（第2行原因数字=可点击的蓝色数字，点击原地变输入框）
   const { text, st } = buildSummaryText(state.selFam);
   const wkLabel = R0.label;
   const fam = state.selFam;
@@ -2483,7 +2484,7 @@ function renderSummaryPanel() {
   };
   // 提示条
   $("#summaryAdjust").innerHTML =
-    '<span class="sa-lbl">💡 小结中的橙色数字可直接点击修改（人工修正优先于自动统计，随快照保存）</span>';
+    '<span class="sa-lbl">💡 小结中<span class="sa-blue">蓝色</span>的数字可直接点击修改（人工修正优先于自动统计，随快照保存）</span>';
   $("#summaryAdjust").classList.toggle("hidden", SNAP_MODE);
   // 管理分类（维护小结分类树；未购药原因列选项跟随）
   const mgrBtn = $("#manageReasonBtn");
