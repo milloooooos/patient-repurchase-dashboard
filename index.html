@@ -223,6 +223,23 @@
   .expand-box .eb-row{display:flex;gap:6px;align-items:baseline;padding:1px 0}
   .expand-box .eb-lbl{flex:0 0 auto}
   .expand-box .eb-val{flex:1 1 auto;word-break:break-word}
+  /* 展开卡：最近一次随访 小标题 + 全部随访记录列表 */
+  .expand-box .eb-sub{font-size:11px;font-weight:700;color:var(--brand);background:var(--brand-soft);display:inline-block;padding:1px 8px;border-radius:5px;margin:6px 0 3px}
+  .eb-fu{white-space:normal;margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+  .eb-fu-title{font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px}
+  .eb-fu-cnt{font-size:11px;color:var(--muted);font-weight:400;margin-left:6px}
+  .eb-fu-list{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+  .eb-fu-item{padding:7px 10px;border-bottom:1px solid #eef2f7}
+  .eb-fu-item:last-child{border-bottom:none}
+  .eb-fu-item.cur{background:#f3f8ff;box-shadow:inset 3px 0 0 var(--brand)}
+  .eb-fu-top{display:flex;flex-wrap:wrap;gap:6px;align-items:center;white-space:normal}
+  .eb-fu-date{font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+  .eb-fu-chip{font-size:11px;padding:1px 6px;border-radius:5px;background:#f1f4f8;color:#5b6472}
+  .eb-fu-chip.warn{background:#fdeceb;color:#c92a2a;font-weight:600}
+  .eb-fu-ex{font-size:11px;color:var(--muted)}
+  .eb-fu-cur{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--brand);color:#fff;font-weight:600}
+  .eb-fu-rs{font-size:12px;color:#b8860b;margin-top:3px;white-space:normal;word-break:break-word}
+  .eb-fu-txt{font-size:12px;color:#4b5563;margin-top:2px;white-space:normal;word-break:break-word;line-height:1.6}
   .tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:12px;font-weight:500;white-space:nowrap;color:#fff}
   .tag-prod{display:inline-block;padding:1px 8px;border-radius:6px;font-size:12px;background:var(--brand-soft);color:var(--brand)}
   .sub{font-size:11px;color:var(--muted);margin-left:4px}
@@ -957,6 +974,10 @@ function RE_FUFAIL_TXT() { return /随访失败|联系不上|联系不到|无法
 function RE_PROLONG_TXT() { return /医嘱延长|遵医嘱延长|医生建议延长|医生建议延迟|医嘱延迟|医生要求延长|延长用药|延长疗程|延长周期|延长用药间隔|拉长用药间隔|拉长周期|改变用药间隔|改变用药周期|自行减少用药剂量|减少用药剂量|减药|减量|剂量调整|改变用药剂量|依从性差|不规律用药|隔日|隔天|隔一天|减少次数|减次|忘记服药|漏服|偶尔漏服/; }
 function RE_PROLONG_DOCTOR_TXT() { return /医嘱|遵医嘱|遵医|医生建议|医生要求|按医嘱|听医生/; }
 function RE_SWITCH_TXT() { return /换药|换品种|更换药品|更换药物|更换治疗方案|更改方案|更换方案|换用|改用|换成|换成其他|换别的|改药|替换|调整用药/; }
+// 「是否/能否换药」这类还在讨论的问句/计划，不算"已经换药"。
+// 例："肿瘤变大，7.28重新做基因检测，看检查结果是否换药" → 只是待定，不应判为脱落·换药。
+const RE_SWITCH_Q = /(是否|能否|可否|要不要|是不是|需不需要|待定|待评估)[^，。；;,\n]{0,8}?(换药|换品种|更换药品|更换药物|更换治疗方案|更改方案|更换方案|改用|换成|改药)/g;
+function stripSwitchQuestion(s) { return String(s || "").replace(RE_SWITCH_Q, ""); }
 function RE_DEATH_TXT() { return /去世|死亡|过世|逝世|离世|不在了/; }
 // 脱落判定专用（排除「转渠道/转院」，避免与③转渠道冲突）
 // 注意：「拒绝随访/联系不上」属「随访失败未探寻原因」(fuFail)，不在此列，避免被并入脱落
@@ -969,6 +990,7 @@ function classifyFuReason(fu) {
   // 原因文本（各门店把脱落/转渠道原因写进「未按时购药原因」同一列的情况很常见）→ 统一按内容判定
   const reasonText = [fu.delay_reason, fu.stop_reason, fu.dropout_reason].filter(Boolean).join(" ");
   const note = [reasonText, fu.purchased_on_time, fu.follow_note].filter(Boolean).join(" ");
+  const noteNoQ = stripSwitchQuestion(note); // 去掉「是否换药」这类待定问句，避免误判为已换药
   const ts = fu.task_status || "";
   // ① 脱落（细分：去世 / 换药 / 经济 / 其他）
   //    信号：停药原因列、易脱落标记、文本命中停止类；或「原因列」命中经济/进展耐药类。
@@ -982,7 +1004,7 @@ function classifyFuReason(fu) {
   if (dropSignal) {
     let d = "其他";
     if (RE_DEATH_TXT().test(note)) d = "去世";
-    else if (RE_SWITCH_TXT().test(note)) d = "换药";
+    else if (RE_SWITCH_TXT().test(noteNoQ)) d = "换药";
     else if (RE_ECON_TXT().test(note)) d = "经济";
     return { key: "dropout", detail: d };
   }
@@ -996,8 +1018,8 @@ function classifyFuReason(fu) {
   if (RE_PROLONG_TXT().test(note)) {
     return { key: "prolong", detail: RE_PROLONG_DOCTOR_TXT().test(note) ? "医嘱" : "自行" };
   }
-  // ⑤ 换药（未命中停药等脱落信号时仍归「脱落·换药」）
-  if (RE_SWITCH_TXT().test(note)) return { key: "dropout", detail: "换药" };
+  // ⑤ 换药（未命中停药等脱落信号时仍归「脱落·换药」；「是否换药」等待定问句不算）
+  if (RE_SWITCH_TXT().test(noteNoQ)) return { key: "dropout", detail: "换药" };
   // ⑥ 推迟购药（含「未按时购药原因」列有值、但内容未命中以上各类的兜底）
   if (fu.delay_reason || RE_DELAY_TXT().test(note)) return { key: "delay", detail: "" };
   return null;
@@ -1700,25 +1722,25 @@ function buildRows() {
       }
       const dueDate = stockEndAfter(bp.purchases, cycle, fam);
 
-      // 匹配随访：优先应购药日前最近一次（同品种；优先「已完成/有执行时间」的真实随访）
+      // 匹配随访：取该患者该品种「最近一次」随访（同品种优先，跨品种兜底）
+      //  · 优先已执行的真实随访（有执行时间或任务已完成），避免未执行任务污染
+      //  · 按执行/计划时间倒序 → 最新在前；最新一条内容为空时（「忽略」任务等）取最近一条有内容的
+      //  ⚠️ 不再限制「必须早于应购药日」：逾期患者的关键跟进常发生在应购日之后，
+      //     旧逻辑会让「随访原因」一直停在上一条旧记录（2026-09-20 修复）
       let matched = null;
+      let fuSorted = [];
       if (fus.length) {
         const sameFam = fus.filter(f => f.product === fam);
         let pool = sameFam.length ? sameFam : fus;
         // 优先已执行的随访（有执行时间或任务已完成），避免未执行任务污染匹配
         const executed = pool.filter(f => f.exec_time || (f.task_status && f.task_status.includes("已完成")));
         if (executed.length) pool = executed;
-        const withDate = pool.map(f => ({ f, d: fuDate(f) })).filter(x => x.d);
-        if (withDate.length) {
-          const before = withDate.filter(x => x.d <= dueDate);
-          if (before.length) {
-            before.sort((a, b) => b.d.localeCompare(a.d)); // 最近一次在前
-            matched = before[0].f;
-          } else {
-            withDate.sort((a, b) => a.d.localeCompare(b.d)); // 之后最早
-            matched = withDate[0].f;
-          }
-        }
+        fuSorted = pool.filter(f => fuDate(f)).sort((a, b) => {
+          const da = fuDate(a), db = fuDate(b);
+          if (da !== db) return db.localeCompare(da);
+          return String(b.exec_time || b.plan_time || "").localeCompare(String(a.exec_time || a.plan_time || ""));
+        });
+        if (fuSorted.length) matched = fuSorted.find(f => fuReasonText(f)) || fuSorted[0];
       }
 
       // 状态判定（周维度，购药事实优先）：
@@ -1785,6 +1807,7 @@ function buildRows() {
         reason: reason, // 未购药原因 key（自动判定预填，用户可覆盖；空=未标）
         status: category,
         _matched: matched,
+        _fu_list: fuSorted, // 该患者该品种的全部随访（按时间倒序），供展开卡「随访记录」列表
       });
     }
   }
@@ -2149,11 +2172,12 @@ function rowHtml(r, idx, cols) {
 
 function expandHtml(r, colspan) {
   const sec = (lbl, val) => val ? `<div class="eb-row"><span class="eb-lbl">${lbl}：</span><span class="eb-val">${esc(val)}</span></div>` : "";
+  const fdate = f => P.datePart(f.exec_time) || P.datePart(f.plan_time) || "";
   const fu = r._matched;
   let fuDetail = "";
   if (fu) {
     const rows = [
-      ["随访时间", P.datePart(fu.exec_time) || P.datePart(fu.plan_time) || ""],
+      ["随访时间", fdate(fu)],
       ["任务状态", fu.task_status],
       ["服务摘要", fu.summary_type],
       ["执行人", fu.executor],
@@ -2166,7 +2190,31 @@ function expandHtml(r, colspan) {
       ["用法用量", fu.dosage],
       ["随访小结", fu.follow_note],
     ];
-    fuDetail = rows.map(([l, v]) => sec(l, v)).join("");
+    fuDetail = `<div class="eb-sub">最近一次随访</div>` + rows.map(([l, v]) => sec(l, v)).join("");
+  }
+  // 全部随访记录（按时间倒序）：展开即可看到完整随访轨迹，最近一次高亮
+  const list = r._fu_list || [];
+  let fuHistory = "";
+  if (list.length) {
+    const items = list.map(f => {
+      const st = String(f.purchased_on_time || "").trim();
+      const stopish = /停药|停用|脱落|流失|失访|换药|去世|死亡|转院|转渠道|不再用药/.test(st);
+      const rs = [f.delay_reason, f.stop_reason, f.dropout_reason].filter(Boolean).join("；");
+      const isCur = f === fu;
+      return `<div class="eb-fu-item${isCur ? " cur" : ""}">` +
+        `<div class="eb-fu-top">` +
+          `<span class="eb-fu-date">${esc(fdate(f))}</span>` +
+          (f.task_status ? `<span class="eb-fu-chip">${esc(f.task_status)}</span>` : "") +
+          (st ? `<span class="eb-fu-chip${stopish ? " warn" : ""}">${esc(st)}</span>` : "") +
+          (f.executor ? `<span class="eb-fu-ex">${esc(f.executor)}</span>` : "") +
+          (isCur ? `<span class="eb-fu-cur">最近一次</span>` : "") +
+        `</div>` +
+        (rs ? `<div class="eb-fu-rs">原因：${esc(rs)}</div>` : "") +
+        (f.follow_note ? `<div class="eb-fu-txt">${esc(String(f.follow_note).replace(/\s*\n\s*/g, " "))}</div>` : "") +
+        `</div>`;
+    }).join("");
+    fuHistory = `<div class="eb-fu"><div class="eb-fu-title">随访记录<span class="eb-fu-cnt">共 ${list.length} 条 · 最新在前</span></div>` +
+      `<div class="eb-fu-list">${items}</div></div>`;
   }
   // 患者级用药周期（赛诺菲等各患者周期不同的品种以该值为准；未填则用「标准周期」产品默认值）
   const famMeta = (M.PRODUCT_FAMILIES || []).find(p => p.family === r.product);
@@ -2184,6 +2232,7 @@ function expandHtml(r, colspan) {
     ${cycSec}
     ${sec("跟进备注", STORE.notes[noteKey(r)] || "")}
     ${fuDetail || '<div class="eb-row"><span class="eb-lbl">无匹配随访记录</span></div>'}
+    ${fuHistory}
   </div></td></tr>`;
 }
 
@@ -3540,7 +3589,7 @@ const TOUR_STEPS = {
     { sel: ".filterbar", title: "只想看某家药房？在这里筛",
       body: "左边框输名字（患者 / 电话 / 医生 / 医院 / 药房）；<br>右边下拉选品种、医院、药房、随访人。" },
     { sel: ".tbl-wrap", title: "这里是每个人的具体情况",
-      body: "重点看 <b>随访原因</b> 那一列——写的是上次随访的原话。<br>点任意一行，可以展开看他全部记录。" },
+      body: "重点看 <b>随访原因</b> 那一列——写的是<b>最近一次</b>随访的原话。<br>点任意一行展开 → 能看他<b>全部随访记录</b>（最新在最上面，标了「最近一次」）。" },
     { sel: "#cycleInputs", title: "日期算得不对？来这里改",
       body: "每种药「<b>一盒吃几天</b>」可以直接改数字，改完立刻重算。<br>右边「<b>按数量</b>」勾上 = 一次买几盒就算几个周期（默认已勾选）。<br>「<b>达必妥</b>」按支算、每个人周期不同——点开患者那一行可以单独填。" },
     { sel: "#weekTabs", title: "想看别的周？切这里",
