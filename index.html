@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>预计购药分析看板</title>
+<title>预计购药分析看板 · 药房药师版</title>
 <style>
   :root{
     --bg:#f7f8fa; --panel:#ffffff; --line:#e6e8eb; --text:#1f2937; --muted:#6b7280;
@@ -310,11 +310,15 @@
   .sp-scope{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
   .sp-scope input{cursor:pointer;accent-color:var(--brand)}
   .rm-foot{display:flex;gap:8px}
+  /* 版本标记（药房药师版 / 项目负责人版 …） */
+  .ver-tag{display:inline-block;margin-left:10px;padding:2px 10px;border-radius:999px;
+    font-size:12px;font-weight:500;letter-spacing:.3px;color:#0f6e56;
+    background:#e1f5ee;border:1px solid #9fe1cb;vertical-align:middle}
 </style>
 </head>
 <body>
 <header>
-  <h1>预计购药分析看板</h1>
+  <h1>预计购药分析看板<span class="ver-tag" title="本版本面向药房药师 / 门店随访人员使用">药房药师版</span></h1>
   <p>上传「销售明细 + 随访任务 + 患者用药周期」三张表 → 自动计算应购药日期、匹配最近随访、判定回购状态。所有计算均在浏览器内完成，数据不上传任何服务器。</p>
 </header>
 
@@ -377,8 +381,6 @@
             <span class="sp-lbl">品种</span>
             <span class="sp-chips" id="summaryFamChips"></span>
           </span>
-          <label class="sp-scope" title="小结末尾是否列出所选医院/药房名单">
-            <input type="checkbox" id="scopeNamesCb" checked> 小结含所选医院名单</label>
           <button class="btn ghost sm" id="manageReasonBtn">管理分类</button>
           <button class="btn ghost sm" id="copyAllSummaryBtn" title="把当前周期下「所有品种」的应回/已回/未回/未购药原因汇总成一份文本，一键复制直接粘贴汇报">复制全部品种</button>
           <button class="btn ghost sm" id="copySummaryBtn">复制小结</button>
@@ -1459,7 +1461,6 @@ const state = {
   periodType: "7d", periodStart: "", periodEnd: "",
   sumCustom: false, sumFrom: "", sumTo: "",
   selFam: "",
-  scopeNames: true, // 小结中是否呈现所选医院/药房名单（可开关）
   reasonTree: cloneReasonTree(DEFAULT_REASON_TREE), // 用户维护后的分类树（随快照保存）
   fuAdj: {},   // { [fam]: { [分类key]: n } } 小结人数人工修正（仅存用户改过的值；key=分类树叶子 key）
 };
@@ -2233,7 +2234,7 @@ function buildSummaryStats(fam) {
   const nStart = addDays(W.end, 1), nEnd = addDays(W.end, 7); // 下一窗口 = 紧随所选周期的 7 天
   const inP = (d, s, e) => d && d >= s && d <= e;
   // 按患者×品种聚合购药日期（从销售明细，与状态机同一数据源）
-  // 跟随所选的医院 / 药房筛选（多选=或）：小结统计范围随筛选变化
+  // 跟随所选的医院 / 药房筛选（多选=或）：统计口径随筛选变化
   const pat = {}; // key -> { name, phone, dates: [] }
   for (const s of STORE.sales) {
     if (s.product !== fam || !s.sales_time) continue;
@@ -2246,7 +2247,7 @@ function buildSummaryStats(fam) {
   const cycleOf = p => STORE.cycles[p.name || p.phone] || state.stdCycle[fam] || 30;
   const boughtKeys = new Set();     // 本周实际购药（当周有购药记录）
   const notBoughtKeys = [];         // 应回未回（下次应购日∈本周 且 未购）
-  const overdueKeys = [];           // 已逾期（下次应购日<周首 且 未购）—— 未购药原因统计范围之二
+  const overdueKeys = [];           // 已逾期（下次应购日<周首 且 未购）—— 未购药原因口径之二
   const nextKeys = [];              // 下周应购（下次应购日∈下周）
   for (const k in pat) {
     const p = pat[k];
@@ -2318,13 +2319,20 @@ function reasonParts(st, fam) {
   return out;
 }
 
-// 可选范围行：小结中呈现所选医院/药房名单（state.scopeNames 开关；未筛选时为空）
-function summaryScopeLine() {
-  if (!state.scopeNames || !(state.hospitals.size || state.pharmacies.size)) return "";
-  const hs = state.hospitals.size ? "医院：" + [...state.hospitals].join("、") : "";
-  const ps = state.pharmacies.size ? "药房：" + [...state.pharmacies].join("、") : "";
-  return "统计范围（" + [hs, ps].filter(Boolean).join("；") + "）";
+// 数据覆盖区间：销售按 sales_time、随访按执行/计划时间的日期部分；返回 "起 ~ 止"
+function dataSpan(list, getter) {
+  let lo = "", hi = "";
+  for (const r of (list || [])) {
+    const d = getter(r);
+    if (!d) continue;
+    if (!lo || d < lo) lo = d;
+    if (!hi || d > hi) hi = d;
+  }
+  return lo ? (lo === hi ? lo : lo + " ~ " + hi) : "";
 }
+function salesSpan() { return dataSpan(STORE.sales, s => s.sales_time || ""); }
+function fuSpan() { return dataSpan(STORE.followups, f => (P.datePart(f.exec_time) || P.datePart(f.plan_time) || "")); }
+function spanTxt(sp) { return sp ? "（" + sp + "）" : ""; }
 
 // 生成小结文案（未购药原因按用户维护的分类树动态生成；父类人数=子类之和）
 function buildSummaryText(fam) {
@@ -2345,8 +2353,6 @@ function buildSummaryText(fam) {
   const nNormal = v4("next_normal", st.normal);
   const nPostpone = v4("next_postpone", st.postpone);
   lines.push(`3. 下周预计复购 ${nNormal + nPostpone} 人，预计正常回购 ${nNormal} 人，推迟 ${nPostpone} 人${pReasons}`);
-  const scopeLine = summaryScopeLine();
-  if (scopeLine) lines.push(scopeLine);
   SUMMARY.text = lines.join("\n");
   return { text: SUMMARY.text, st };
 }
@@ -2361,8 +2367,6 @@ function buildAllFamsSummaryText() {
   if (state.hospitals.size) scopes.push("医院" + state.hospitals.size + "家");
   if (state.pharmacies.size) scopes.push("药房" + state.pharmacies.size + "家");
   out.push(`【应购随访汇总】${R.start} ~ ${R.end}` + (scopes.length ? `（按 ${scopes.join("、")} 统计）` : ""));
-  const scopeLine = summaryScopeLine();
-  if (scopeLine) out.push(scopeLine);
   out.push("");
   for (const fam of fams) {
     const st = buildSummaryStats(fam);
@@ -2403,7 +2407,7 @@ function renderSummaryPanel() {
     ch.onclick = () => { state.selFam = ch.dataset.fam; renderSummaryPanel(); };
   });
   // 小结统计周期：默认跟随「上周/本周/下周」视图（起止由「周截止日」决定，与状态机一致）；勾选「自定义」后按指定起止日期
-  // 统计范围跟随 医院/药房 筛选（多选=或）
+  // 统计口径跟随 医院/药房 筛选（多选=或）
   const R0 = getSummaryRange();
   const W0 = getWeekRange(state.weekSel);
   const scope = [];
@@ -2450,15 +2454,8 @@ function renderSummaryPanel() {
   const nNormal = v4("next_normal", st.normal);
   const nPostpone = v4("next_postpone", st.postpone);
   const line4 = `3. 下周预计复购 <span class="sn-total" title="由正常+推迟之和决定">${nNormal + nPostpone}</span> 人，预计正常回购 <span class="sn-num" data-k="next_normal" title="点击修改人数">${nNormal}</span> 人，推迟 <span class="sn-num" data-k="next_postpone" title="点击修改人数">${nPostpone}</span> 人${pReasons}`;
-  const line5 = summaryScopeLine();
   $("#summaryText").innerHTML =
-    esc(line1) + "\n2. 未购药原因：" + line2 + "；\n" + line4 + (line5 ? "\n" + esc(line5) : "");
-  // 小结是否呈现所选医院/药房名单开关
-  const scopeCb = $("#scopeNamesCb");
-  if (scopeCb) {
-    scopeCb.checked = !!state.scopeNames;
-    scopeCb.onchange = () => { state.scopeNames = !!scopeCb.checked; renderSummaryPanel(); };
-  }
+    esc(line1) + "\n2. 未购药原因：" + line2 + "；\n" + line4;
   // 点击数字 → 原地变输入框，回车/失焦保存（Esc 取消）
   $("#summaryText").onclick = (e) => {
     if (SNAP_MODE) return;
@@ -2792,7 +2789,7 @@ $("#startBtn").onclick = async () => {
       $("#board").classList.remove("hidden");
       const dupNote = (sd.dup || fd.dup) ? `，自动去重 ${sd.dup} 条销售 / ${fd.dup} 条随访` : "";
       $("#dataInfo").textContent =
-        `销售明细 ${STORE.sales.length} 条（本次新增 ${sd.add.length}${dupNote}） · 随访任务 ${STORE.followups.length} 条 · 用药周期 ${Object.keys(STORE.cycles).length} 人`;
+        `销售明细 ${STORE.sales.length} 条${spanTxt(salesSpan())} · 随访任务 ${STORE.followups.length} 条${spanTxt(fuSpan())} · 用药周期 ${Object.keys(STORE.cycles).length} 人 —— 本次新增 ${sd.add.length} 条销售${dupNote}`;
       // 全部都是重复：明确提示（避免用户以为没导进去）
       if (!sd.add.length && res.sales.length) {
         setTimeout(() => alert(`本次导入的 ${res.sales.length} 条销售记录与已存数据完全相同，已全部自动去重，未重复计算。`), 60);
@@ -2803,7 +2800,7 @@ $("#startBtn").onclick = async () => {
       STORE.cycles = res.cycles;
       $("#board").classList.remove("hidden");
       $("#dataInfo").textContent =
-        `销售明细 ${res.sales.length} 条 · 随访任务 ${res.followups.length} 条 · 用药周期 ${Object.keys(res.cycles).length} 人`;
+        `销售明细 ${res.sales.length} 条${spanTxt(salesSpan())} · 随访任务 ${res.followups.length} 条${spanTxt(fuSpan())} · 用药周期 ${Object.keys(res.cycles).length} 人`;
     }
     // 回传数据回流（上一轮导出的「随访回传表」在本轮自动接续）
     const cb = applyCallbackRecords(res.followups);
@@ -3287,7 +3284,7 @@ async function doSnapshot(desen) {
         cats: [...state.cats], reasons: [...state.reasons], repurParts: [...state.repurParts],
         products: [...state.products],
         hospitals: [...state.hospitals], pharmacies: [...state.pharmacies], executors: [...state.executors],
-        plainName: state.plainName, plainPhone: state.plainPhone, plainDoctor: state.plainDoctor, scopeNames: state.scopeNames,
+        plainName: state.plainName, plainPhone: state.plainPhone, plainDoctor: state.plainDoctor,
         maskMode: state.maskMode,
         hiddenCols: [...state.hiddenCols],
         periodType: state.periodType, periodStart: state.periodStart, periodEnd: state.periodEnd,
@@ -3375,7 +3372,6 @@ function loadSnapshot(snap) {
   state.executors = new Set(s.executors || []);
   state.plainName = !!s.plainName; state.plainPhone = !!s.plainPhone; state.plainDoctor = !!s.plainDoctor;
   state.maskMode = s.maskMode || "edge";
-  state.scopeNames = s.scopeNames !== false;
   if (s.hiddenCols) state.hiddenCols = new Set(s.hiddenCols);
   // 整体小结状态恢复（快照中只读展示保存的小结文本）
   state.periodType = s.periodType || "7d";
@@ -3498,7 +3494,7 @@ async function restorePersisted() {
   $("#board").classList.remove("hidden");
   const savedAt = blob.savedAt ? new Date(blob.savedAt).toLocaleString("zh-CN") : "";
   $("#dataInfo").textContent =
-    `已自动恢复上次数据（${savedAt}）：销售明细 ${STORE.sales.length} 条 · 随访任务 ${STORE.followups.length} 条 · 用药周期 ${Object.keys(STORE.cycles).length} 人 —— 只需再导入「新一周」的表即可增量更新`;
+    `已自动恢复上次数据（${savedAt}）：销售明细 ${STORE.sales.length} 条${spanTxt(salesSpan())} · 随访任务 ${STORE.followups.length} 条${spanTxt(fuSpan())} · 用药周期 ${Object.keys(STORE.cycles).length} 人 —— 只需再导入「新一周」的表即可增量更新`;
   state.page = 1;
   await refresh();
   return true;
@@ -3544,8 +3540,14 @@ const TOUR_STEPS = {
       body: "左边框输名字（患者 / 电话 / 医生 / 医院 / 药房）；<br>右边下拉选品种、医院、药房、随访人。" },
     { sel: ".tbl-wrap", title: "这里是每个人的具体情况",
       body: "重点看 <b>随访原因</b> 那一列——写的是上次随访的原话。<br>点任意一行，可以展开看他全部记录。" },
+    { sel: "#cycleInputs", title: "日期算得不对？来这里改",
+      body: "每种药「<b>一盒吃几天</b>」可以直接改数字，改完立刻重算。<br>右边「<b>按数量</b>」勾上 = 一次买几盒就算几个周期（默认已勾选）。<br>「<b>达必妥</b>」按支算、每个人周期不同——点开患者那一行可以单独填。" },
+    { sel: "#weekTabs", title: "想看别的周？切这里",
+      body: "「<b>上周 / 本周 / 下周</b>」只是切换<b>看哪一周</b>，不会改动数据。<br>想回看更早的时间，把右边「<b>参考日</b>」改成那一天即可。" },
     { sel: "#summaryPanel", title: "写周报就靠这一块",
       body: "应回多少人、实际回来多少、没回是什么原因，它都替你算好了。" },
+    { sel: "#summaryPanel .sp-group", title: "周报算哪段时间？这里能改",
+      body: "默认统计「<b>本周</b>」。<br>勾上「<b>自定义</b>」就会多出<b>起止日期</b>，可以统计任意一段时间（比如整个月、或某个活动周期）。<br>改完，小结和「复制全部品种」的周报都会一起跟着变。" },
     { sel: "#copyAllSummaryBtn", title: "点这里，复制全部品种周报",
       body: "复制好以后，直接粘到微信或邮件里发出去就行。" },
     { sel: "#exportBtn", title: "要发给同事？导出就行",
