@@ -177,6 +177,11 @@
     display:flex;align-items:center;gap:8px}
   .fs-label::before{content:"";width:4px;height:14px;border-radius:3px;background:var(--brand)}
   .fs-hint{font-size:12px;color:var(--muted);font-weight:400}
+  /* 状态小字备注：讲清 5 类状态的区别，避免药师看晕（尤其 已逾期 vs 长期未购 vs 已结案） */
+  .status-legend{margin:6px 2px 2px;font-size:12px;line-height:1.95;color:var(--muted)}
+  .status-legend b{color:var(--text);font-weight:600}
+  .status-legend .sl-sep{color:#c7cdd6;margin:0 3px}
+  .status-legend u{text-decoration:none;border-bottom:1px dotted var(--brand);color:var(--brand)}
   .filterinfo{color:var(--muted);font-size:12px;margin:6px 2px 0}
   .subtype-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 2px}
   .subtype-bar.hidden{display:none}
@@ -381,8 +386,19 @@
 
     <!-- 状态统计 -->
     <div class="filter-section">
-      <div class="fs-label">患者状态<span class="fs-hint">点击卡片筛选，再次点击取消；「应回购」= 应回未回 + 应回已回（细分可点选）；「已逾期」= 应购日已过所选周，「长期未购」= 逾期超过下方阈值（默认 90 天，属存量）；「已结案」= 最近随访明确去世/转渠道，不再跟进；「未购药原因」列点击可为患者标注原因（自动判定预填，可覆盖），小结只统计「应回未回」的原因，分类可点「管理分类」维护；计数随品种/医院/药房等筛选变化</span></div>
+      <div class="fs-label">患者状态<span class="fs-hint">点击卡片筛选，再次点击取消；「未购药原因」列点击可为患者标注原因（自动判定预填，可覆盖），小结只统计「应回未回」的原因，分类可点「管理分类」维护；计数随品种/医院/药房等筛选变化</span></div>
       <div class="summary" id="summary"></div>
+      <div class="status-legend">
+        <b>应回购</b>＝<u>本周</u>该买（其中「应回未回」＝还没买，是要催的人）
+        <span class="sl-sep">·</span>
+        <b>未到期</b>＝还没到该买的日子
+        <span class="sl-sep">·</span>
+        <b>已逾期</b>＝应购日已经过去（按「周」算，不含更早的老存量）
+        <span class="sl-sep">·</span>
+        <b>长期未购</b>＝逾期已超过 <span id="lgInlineDays">90</span> 天（老存量，催回来的少）
+        <span class="sl-sep">·</span>
+        <b>已结案</b>＝随访已写明去世／转到别处买，<u>不用再联系</u>
+      </div>
       <div class="subtype-bar hidden" id="repurPartBar"></div>
       <div class="subtype-bar hidden" id="reasonBar"></div>
     </div>
@@ -963,7 +979,8 @@ function followupSignal(fu) {
     return { signal: "nonstd", reason: "推迟原因:" + dft.slice(0, 40) };
   }
   // 6. 随访小结文本（自由文本，仅作弱信号）
-  const note = fu.follow_note || "";
+  //    先剥掉「看能否停药 / 是否换药」这类**待定问句**，否则"遵医嘱看能否停药，8.28继续用药"会被判脱落
+  const note = stripTentative(fu.follow_note || "");
   if (note) {
     if (RE_DROPOUT_TXT().test(note)) return { signal: "dropout", reason: note.slice(0, 50) };
     if (RE_NONSTD_TXT().test(note)) return { signal: "nonstd", reason: note.slice(0, 50) };
@@ -1006,6 +1023,12 @@ function closedKind(fu) {
 // 例："肿瘤变大，7.28重新做基因检测，看检查结果是否换药" → 只是待定，不应判为脱落·换药。
 const RE_SWITCH_Q = /(是否|能否|可否|要不要|是不是|需不需要|待定|待评估)[^，。；;,\n]{0,8}?(换药|换品种|更换药品|更换药物|更换治疗方案|更改方案|更换方案|改用|换成|改药)/g;
 function stripSwitchQuestion(s) { return String(s || "").replace(RE_SWITCH_Q, ""); }
+// 同理：「遵医嘱看能否停药」这类**还在讨论**的停药问句，不算"已停药"。
+// 例："…遵医嘱看能否停药，8.28继续用药" → 明明还在用药，不能判脱落。
+const RE_STOP_Q = /(能否|可否|是否|要不要|能不能|需不需要|看能否|看是否|看可不可以)[^，。；;,\n]{0,4}?(停药|停用|停止用药|停药观察)/g;
+function stripStopQuestion(s) { return String(s || "").replace(RE_STOP_Q, ""); }
+// 自由文本统一预处理：先剥掉「待定」类问句，再做脱落/换药信号判定
+function stripTentative(s) { return stripStopQuestion(stripSwitchQuestion(s)); }
 function RE_DEATH_TXT() { return /去世|死亡|过世|逝世|离世|不在了/; }
 // 脱落判定专用（排除「转渠道/转院」，避免与③转渠道冲突）
 // 注意：「拒绝随访/联系不上」属「随访失败未探寻原因」(fuFail)，不在此列，避免被并入脱落
@@ -1018,7 +1041,8 @@ function classifyFuReason(fu) {
   // 原因文本（各门店把脱落/转渠道原因写进「未按时购药原因」同一列的情况很常见）→ 统一按内容判定
   const reasonText = [fu.delay_reason, fu.stop_reason, fu.dropout_reason].filter(Boolean).join(" ");
   const note = [reasonText, fu.purchased_on_time, fu.follow_note].filter(Boolean).join(" ");
-  const noteNoQ = stripSwitchQuestion(note); // 去掉「是否换药」这类待定问句，避免误判为已换药
+  const noteNoQ = stripSwitchQuestion(note);        // 去掉「是否换药」这类待定问句，避免误判为已换药
+  const noteQ = stripTentative(note);               // 再去掉「看能否停药」——待定，不算已停药
   const ts = fu.task_status || "";
   // ① 脱落（细分：去世 / 换药 / 经济 / 其他）
   //    信号：停药原因列、易脱落标记、文本命中停止类；或「原因列」命中经济/进展耐药类。
@@ -1026,7 +1050,7 @@ function classifyFuReason(fu) {
   const hasDelayWord = RE_DELAY_TXT().test(reasonText);
   const dropSignal = fu.stop_reason
     || (fu.is_dropout && /^(是|有)/.test(fu.is_dropout))
-    || RE_DROPOUT_ONLY().test(note)
+    || RE_DROPOUT_ONLY().test(noteQ)
     || (RE_ECON_TXT().test(reasonText) && !hasDelayWord)
     || (/耐药|疾病进展|病情进展|病情延展|延展|恶化/.test(reasonText) && !hasDelayWord);
   if (dropSignal) {
@@ -1795,7 +1819,7 @@ function buildRows() {
           if (treeKeys.includes(k)) autoReason = k;
         }
       }
-      const reason = STORE.reasonOverrides[subKey] || autoReason; // 用户点选覆盖优先
+      const reason0 = STORE.reasonOverrides[subKey] || autoReason; // 用户点选覆盖优先
       // 状态互斥判定（顺序即优先级）：
       //  ① 所选周内有购药 → 应回购·应回已回（购药事实最优先）
       //  ② 最近一次随访明确「去世 / 转渠道」→ 已结案（不再跟进；不做重复跟进，避免药师白打电话）
@@ -1816,6 +1840,16 @@ function buildRows() {
       } else {
         category = "未到期";
       }
+      // 「应回未回」兜底规则（2026-09-21 用户定）：
+      //   当月已做过随访 + 当月未购药 + 随访内容无法明确未购药原因 → 判为「推迟购药」。
+      //   理由：本周该买没买、药师当月也联系过了，属于"晚几天来"，不是脱落。
+      //   只在「应回未回」生效——已逾期 / 长期未购 / 已结案属存量，不纳入本周原因统计。
+      const repMon = (W.end || "").slice(0, 7);                 // 报告周期所在自然月
+      const boughtThisMonth = bp.purchases.some(x => String(x.date || "").slice(0, 7) === repMon);
+      const fuMon = matched ? (fuDate(matched) || "").slice(0, 7) : "";
+      const delayFallback = !!(repurPart === "应回未回" && !autoReason && matched
+        && repMon && fuMon === repMon && !boughtThisMonth);
+      const reason = delayFallback ? "delay" : reason0;
 
       const isRepur = repurPart === "应回已回";
       // 应购药日期列展示值（应回已回行=预判应购日）；是否落在所选周 → 列表置顶 + 特殊底色
@@ -2551,6 +2585,8 @@ function renderSummaryPanel() {
     if (stEl) stEl.onchange = () => { state.sumTo = stEl.value || state.sumTo; renderSummaryPanel(); };
   }
   // 「长期未购」阈值（天）：>0 时把逾期超过该天数的人从「已逾期」单列；0 = 不启用
+  const lgTxt = $("#lgInlineDays");
+  if (lgTxt) lgTxt.textContent = state.longGoneDays;
   const lgInp = $("#longGoneDaysInput");
   if (lgInp) {
     lgInp.value = state.longGoneDays;
