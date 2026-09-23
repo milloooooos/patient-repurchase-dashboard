@@ -1844,16 +1844,23 @@ function buildRows() {
       } else {
         category = "未到期";
       }
-      // 「应回未回」兜底规则（2026-09-21 用户定）：
-      //   当月已做过随访 + 当月未购药 + 随访内容无法明确未购药原因 → 判为「推迟购药」。
-      //   理由：本周该买没买、药师当月也联系过了，属于"晚几天来"，不是脱落。
-      //   只在「应回未回」生效——已逾期 / 长期未购 / 已结案属存量，不纳入本周原因统计。
+      // 「该催但还没买」兜底规则（2026-09-21 定；2026-09-23 扩范围）：
+      //   当月已随访 + 当月未购药 + 随访内容无法明确未购药原因 → 判为「推迟购药」。
+      //   适用范围：① 应回未回（本周该购未购）；② 已逾期但「逾期 ≤ 7 天」——刚过应购日、仍在用药周期
+      //   7 天自然波动内，属"晚几天会来"，不是脱落/存量。
+      //   逾期 > 7 天的已逾期、长期未购、已结案仍按存量处理，不纳入本规则。
       const repMon = (W.end || "").slice(0, 7);                 // 报告周期所在自然月
       const boughtThisMonth = bp.purchases.some(x => String(x.date || "").slice(0, 7) === repMon);
       const fuMon = matched ? (fuDate(matched) || "").slice(0, 7) : "";
-      const delayFallback = !!(repurPart === "应回未回" && !autoReason && matched
+      const delayScope = (repurPart === "应回未回") || (category === "已逾期" && overdueDays <= 7);
+      const delayFallback = !!(delayScope && !autoReason && matched
         && repMon && fuMon === repMon && !boughtThisMonth);
       const reason = delayFallback ? "delay" : reason0;
+      // 「逾期 > 7 天且没有任何随访内容」的 已逾期/长期未购 → 提示需去随访探寻未购药原因（用户 2026-09-23）。
+      // 不新增分类、不进小结；仅在明细「未购药原因」列显示红色提示，仍可点选覆盖。
+      const fuHasText = !!(matched && fuReasonText(matched));
+      const needAsk = !reason && !fuHasText
+        && (category === "已逾期" || category === "长期未购") && overdueDays > 7;
 
       const isRepur = repurPart === "应回已回";
       // 应购药日期列展示值（应回已回行=预判应购日）；是否落在所选周 → 列表置顶 + 特殊底色
@@ -1884,6 +1891,7 @@ function buildRows() {
         fu_signal: sig.signal === "unknown" ? "" : sig.reason,
         fu_signal_kind: sig.signal, // 信号类别：normal / nonstd / dropout / unknown（用于着色）
         reason: reason, // 未购药原因 key（自动判定预填，用户可覆盖；空=未标）
+        need_ask: needAsk, // true = 已逾期/长期未购且逾期>7天、无任何随访内容 → 明细提示「需探寻未购药原因」（仅展示，不加分类/不进小结）
         status: category,
         overdue_days: overdueDays,                 // 逾期天数（应购日距今；未逾期=0）
         closed_kind: closed,                       // "" / 去世 / 转渠道 / 脱落（已结案原因）
@@ -2226,6 +2234,8 @@ function rowHtml(r, idx, cols) {
         label = "已购药"; color = "#0f9d6b";
       } else if (r.status === "未到期") {
         label = "—";
+      } else if (r.need_ask) {
+        label = "需探寻未购药原因"; color = "#e03131";
       } else {
         label = "未标";
       }
@@ -3713,13 +3723,15 @@ const TOUR_STEPS = {
   ],
   result: [
     { sel: "#summary", title: "这几张卡片 = 几类人（可以点）",
-      body: "最要紧的是「<b>应回购</b>」——这周该来买药的人。<br><b>每张卡片都能点</b>：点一下，下面名单就把这类人<b>自动高亮、排到最前面</b>，其他人变灰。<br>「<b>长期未购</b>」= 好久没来的存量（默认逾期超 90 天，天数可改）；「<b>已结案</b>」= 判定为脱落（停药/换药等）、或已去世、或转去别处买，不用再打电话。" },
+      body: "最要紧的是「<b>应回购</b>」——这周该来买药的人。<br><b>每张卡片都能点</b>：点一下，下面名单就把这类人<b>自动高亮、排到最前面</b>，其他人变灰。<br>「<b>已逾期</b>」= 应购日已经过去了；「<b>长期未购</b>」= 逾期超 90 天的老存量（天数可改）；「<b>已结案</b>」= 判定为脱落（停药/换药等）、或已去世、或转去别处买，不用再打电话。" },
     { sel: "#repurPartBar", title: "这两个小标签也能点",
       body: "「应回购」分两种：<b>应回未回</b>（还没来，要催）、<b>应回已回</b>（已经买到了）。<br><b>点它们同样能筛</b>，名单只会高亮这一类人。" },
+    { sel: "#reasonBar", title: "「未购药原因」也能筛，而且跟着状态走",
+      body: "这一排每个原因都能点，点了名单就只看这类人。<br>它的数字会<b>跟着你上面选的状态变</b>——比如先点「应回未回」，这里就只列应回未回的人的原因，<b>数字＝点了之后命中的人数</b>，不会出现「点了却没人」。<br>「<b>推迟购药</b>」= 该买还没买（刚过应购日 7 天内，属正常波动）；「<b>脱落</b>」类的人会自动进「已结案」。" },
     { sel: ".filterbar", title: "只想看某家药房？在这里筛",
       body: "左边框输名字（患者 / 电话 / 医生 / 医院 / 药房）；<br>右边下拉选品种、医院、药房、随访人。" },
     { sel: ".tbl-wrap", title: "这里是每个人的具体情况",
-      body: "重点看 <b>随访原因</b> 那一列——写的是<b>最近一次</b>随访的原话。<br>点任意一行展开 → 能看他<b>全部随访记录</b>（最新在最上面，标了「最近一次」）。" },
+      body: "重点看 <b>随访原因</b> 那一列——写的是<b>最近一次</b>随访的原话。<br>「<b>未购药原因</b>」列可以直接点选修改；标红「<b>需探寻未购药原因</b>」的，是逾期超 7 天又没随访过的人，<b>建议尽快去随访问原因</b>。<br>点任意一行展开 → 能看他<b>全部随访记录</b>（最新在最上面，标了「最近一次」）。" },
     { sel: "#cycleInputs", title: "日期算得不对？来这里改",
       body: "每种药「<b>一盒吃几天</b>」可以直接改数字，改完立刻重算。<br>右边「<b>按数量</b>」勾上 = 一次买几盒就算几个周期（默认已勾选）。<br>「<b>达必妥</b>」按支算、每个人周期不同——点开患者那一行可以单独填。" },
     { sel: "#weekTabs", title: "想看别的周？切这里",
