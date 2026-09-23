@@ -397,7 +397,7 @@
         <span class="sl-sep">·</span>
         <b>长期未购</b>＝逾期已超过 <span id="lgInlineDays">90</span> 天（老存量，催回来的少）
         <span class="sl-sep">·</span>
-        <b>已结案</b>＝随访已写明去世／转到别处买，<u>不用再联系</u>
+        <b>已结案</b>＝未购药原因判为脱落（停药/换药等），或随访写明去世／转到别处买，<u>不用再联系</u>
       </div>
       <div class="subtype-bar hidden" id="repurPartBar"></div>
       <div class="subtype-bar hidden" id="reasonBar"></div>
@@ -779,7 +779,7 @@ function normalizeProduct(v) {
 //  已回购细分：应回未回（应购日∈所选周未购药）/ 应回已回（所选周内有购药记录）。
 // 「已逾期」= 应购日早于所选周首；其中「应购日距今已过 > 长期未购阈值（默认 90 天）」的单列为「长期未购」，
 //   与「应回未回」互斥，不影响本周应催人数。
-// 「已结案」= 最近一次随访在**结构化原因列**里明确「去世 / 转渠道」→ 后续不再跟进（优先级仅低于「应回已回」）。
+// 「已结案」= 未购药原因判定为「脱落」类（换药/经济/去世/其他），或最近一次随访在结构化原因列明确「去世 / 转渠道」→ 后续不再跟进（优先级仅低于「应回已回」）。
 // 所有患者按下钻子状态标注：正常状态 / 预判延期 / 已脱落（依据最近随访内容判定，用户可点选手动修正）。
 const CATEGORIES = ["应回购", "未到期", "已逾期", "长期未购", "已结案"];
 const REPUR_PARTS = ["应回未回", "应回已回"];
@@ -1452,7 +1452,7 @@ const CAT_COLOR = {
   "未到期": "#3b5bdb",   // 应购日尚未到所选周
   "已逾期": "#f08c00",   // 应购日已过所选周（逾期 ≤ 长期未购阈值）
   "长期未购": "#7048e8", // 逾期超过阈值（默认 90 天）——长期存量，与「本周该催」区分
-  "已结案": "#6c757d",   // 最近随访明确 去世 / 转渠道 → 不再跟进
+  "已结案": "#6c757d",   // 未购药原因=脱落类 / 随访明确 去世·转渠道 → 不再跟进
 };
 const REPUR_PART_COLOR = {
   "应回未回": "#e03131", // 应购日∈所选周但未购药，需跟进
@@ -1822,10 +1822,14 @@ function buildRows() {
       const reason0 = STORE.reasonOverrides[subKey] || autoReason; // 用户点选覆盖优先
       // 状态互斥判定（顺序即优先级）：
       //  ① 所选周内有购药 → 应回购·应回已回（购药事实最优先）
-      //  ② 最近一次随访明确「去世 / 转渠道」→ 已结案（不再跟进；不做重复跟进，避免药师白打电话）
+      //  ② 未购药原因判定为「脱落」类（换药/经济/去世/其他）或随访明确「去世 / 转渠道」→ 已结案（不再跟进）
       //  ③ 应购日 < 周首 → 已逾期；其中「应购日距今已过 > 长期未购阈值」单列 长期未购
       //  ④ 应购日 ∈ 所选周 → 应回购·应回未回；⑤ 其余 → 未到期
-      const closed = M.closedKind(matched);
+      // 结案依据（用户 2026-09-23：「按照脱落判定」）：未购药原因若为脱落子类 → 结案；去世单独标出。
+      const _dropoutReason = !!reason0 && reason0.indexOf("dropout_") === 0;
+      const closed = _dropoutReason
+        ? (reason0 === "dropout_death" ? "去世" : "脱落")
+        : M.closedKind(matched);
       const overdueDays = Math.max(0, -days); // 逾期天数（与「距今天数」列同基准：应购日 → 今天）
       const lgDays = (state.longGoneDays == null ? 90 : Number(state.longGoneDays) || 0);
       let category, repurPart = "";
@@ -1882,7 +1886,7 @@ function buildRows() {
         reason: reason, // 未购药原因 key（自动判定预填，用户可覆盖；空=未标）
         status: category,
         overdue_days: overdueDays,                 // 逾期天数（应购日距今；未逾期=0）
-        closed_kind: closed,                       // "" / 去世 / 转渠道（已结案原因）
+        closed_kind: closed,                       // "" / 去世 / 转渠道 / 脱落（已结案原因）
         _matched: matched,
         _fu_list: fuSorted, // 该患者该品种的全部随访（按时间倒序），供展开卡「随访记录」列表
       });
@@ -1904,11 +1908,14 @@ function buildRows() {
 // 状态卡片计数跟随 品种/医院/随访人/关键词 筛选，但不受状态本身筛选影响）
 function filterRows(rows, opts) {
   let rs = rows;
-  if (!(opts && opts.skipCat)) {
-    if (state.cats.size) rs = rs.filter(r => state.cats.has(r.status));
-    if (state.reasons.size) rs = rs.filter(r => r.reason && state.reasons.has(r.reason));
-    if (state.repurParts.size) rs = rs.filter(r => r.repur_part && state.repurParts.has(r.repur_part));
-  }
+  // 维度开关：
+  //   skipCat    = 跳过「状态/原因/应回购细分」三类（状态卡片计数基数用）
+  //   skipReasons = 只跳过「原因」一类（原因 chips 计数用：跟随状态/细分，保证计数与点击命中一致）
+  const _skipCat = !!(opts && opts.skipCat);
+  const _skipReasons = _skipCat || !!(opts && opts.skipReasons);
+  if (!_skipCat && state.cats.size) rs = rs.filter(r => state.cats.has(r.status));
+  if (!_skipReasons && state.reasons.size) rs = rs.filter(r => r.reason && state.reasons.has(r.reason));
+  if (!_skipCat && state.repurParts.size) rs = rs.filter(r => r.repur_part && state.repurParts.has(r.repur_part));
   if (state.products.size) rs = rs.filter(r => state.products.has(r.product));
   if (state.hospitals.size) rs = rs.filter(r => state.hospitals.has(r.hospital || "未知"));
   if (state.pharmacies.size) rs = rs.filter(r => state.pharmacies.has(r.pharmacy || "未知"));
@@ -2201,10 +2208,10 @@ function rowHtml(r, idx, cols) {
       if (r.status === "应回购" && r.repur_part) {
         return `<td><span class="tag" style="background:${REPUR_PART_COLOR[r.repur_part]}">${esc(r.repur_part)}</span></td>`;
       }
-      // 已结案：标出结案原因（去世 / 转渠道），提示不再跟进
+      // 已结案：标出结案原因（脱落 / 去世 / 转渠道），提示不再跟进
       if (r.status === "已结案") {
         const cc = CAT_COLOR["已结案"];
-        return `<td><span class="tag" style="background:${cc}" title="最近一次随访已明确「${esc(r.closed_kind || "结案")}」，后续不再跟进">已结案·${esc(r.closed_kind || "结案")}</span></td>`;
+        return `<td><span class="tag" style="background:${cc}" title="已判定「${esc(r.closed_kind || "结案")}」，后续不再跟进">已结案·${esc(r.closed_kind || "结案")}</span></td>`;
       }
       const color = CAT_COLOR[r.status] || "#868e96";
       return `<td><span class="tag" style="background:${color}"${r.status === "长期未购" ? ` title="逾期超过 ${state.longGoneDays} 天，属长期存量，不纳入本周未购药原因统计"` : ""}>${esc(r.status)}</span></td>`;
@@ -2383,7 +2390,7 @@ function buildSummaryStats(fam) {
   const notBoughtKeys = [];         // 应回未回（下次应购日∈本周 且 未购）——**唯一**的未购药原因统计口径
   const overdueKeys = [];           // 已逾期（下次应购日<周首，且逾期未超「长期未购」阈值）
   const longGoneKeys = [];          // 长期未购（已逾期且逾期超过阈值 —— 存量，不纳入本周原因统计）
-  const closedKeys = [];            // 已结案（最近随访明确 去世/转渠道 —— 不再跟进）
+  const closedKeys = [];            // 已结案（未购药原因=脱落 或 随访明确 去世/转渠道 —— 不再跟进）
   const nextKeys = [];              // 下周应购（下次应购日∈下周）
   const lgDays = (state.longGoneDays == null ? 90 : Number(state.longGoneDays) || 0);
   for (const k in pat) {
@@ -2788,9 +2795,13 @@ async function refresh() {
   DATA.matched = matched;   // 导出 / 回传表：仅命中选择集
   // 多选面板用「全量」计数（不随筛选遮蔽）
   const full = buildSummary(all);
+  // 原因 chips 计数：套用「状态 / 应回购细分」等筛选，但**不套用原因自身**——保证 chip 上的数字 = 点了之后命中的人数
+  // （修复：先点「应回未回」再点存量类原因时，二者交集为 0，表现为"点了没明细/没高亮"）
+  const reasonBy = buildSummary(filterRows(all, { skipReasons: true })).by_reason;
   $("#summary").innerHTML = "";
   renderSummary(Object.assign({}, CURRENT.summary, {
     by_product: full.by_product, by_hospital: full.by_hospital, by_executor: full.by_executor,
+    by_reason: reasonBy,
   }));
   renderTable();
   renderSummaryPanel();
@@ -3702,7 +3713,7 @@ const TOUR_STEPS = {
   ],
   result: [
     { sel: "#summary", title: "这几张卡片 = 几类人（可以点）",
-      body: "最要紧的是「<b>应回购</b>」——这周该来买药的人。<br><b>每张卡片都能点</b>：点一下，下面名单就把这类人<b>自动高亮、排到最前面</b>，其他人变灰。<br>「<b>长期未购</b>」= 好久没来的存量（默认逾期超 90 天，天数可改）；「<b>已结案</b>」= 已去世或转去别处买，不用再打电话。" },
+      body: "最要紧的是「<b>应回购</b>」——这周该来买药的人。<br><b>每张卡片都能点</b>：点一下，下面名单就把这类人<b>自动高亮、排到最前面</b>，其他人变灰。<br>「<b>长期未购</b>」= 好久没来的存量（默认逾期超 90 天，天数可改）；「<b>已结案</b>」= 判定为脱落（停药/换药等）、或已去世、或转去别处买，不用再打电话。" },
     { sel: "#repurPartBar", title: "这两个小标签也能点",
       body: "「应回购」分两种：<b>应回未回</b>（还没来，要催）、<b>应回已回</b>（已经买到了）。<br><b>点它们同样能筛</b>，名单只会高亮这一类人。" },
     { sel: ".filterbar", title: "只想看某家药房？在这里筛",
