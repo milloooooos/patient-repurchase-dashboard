@@ -1248,7 +1248,7 @@ function normalizeSales(row, colmap, sourceFile, sheetName, i) {
     qty: _gtext(row, colmap, "qty") || null,
     amount: _gtext(row, colmap, "amount") || null,
     member_id: _gtext(row, colmap, "member_id") || null,
-    patient_name: _gtext(row, colmap, "patient_name") || null,
+    patient_name: (_gtext(row, colmap, "patient_name") || _gtext(row, colmap, "member_id")) || null, // 姓名缺失时回填会员号：「患者姓名」列即取自会员号
     phone: _gtext(row, colmap, "phone") || null,
     hospital: _gtext(row, colmap, "hospital") || null,
     pharmacy: _gtext(row, colmap, "pharmacy") || null,
@@ -1267,7 +1267,7 @@ function normalizeFollowup(row, colmap, sourceFile, sheetName, i) {
   const rec = {
     source: "followup", _row_id: `${sourceFile}::followup::${sheetName}::${i}`,
     task_status: _gtext(row, colmap, "task_status") || null,
-    patient_name: _gtext(row, colmap, "f_patient_name") || null,
+    patient_name: (_gtext(row, colmap, "f_patient_name") || _gtext(row, colmap, "member_id")) || null, // 姓名缺失时回填会员号
     is_key: _gtext(row, colmap, "is_key") || null,
     patient_id: _gtext(row, colmap, "patient_id") || null,
     phone: _gtext(row, colmap, "f_phone") || null,
@@ -1599,7 +1599,6 @@ function diffDays(a, b) { // a - b（天）
   return Math.round((new Date(a + "T00:00:00") - new Date(b + "T00:00:00")) / 86400000);
 }
 function phoneDigits(v) { return P.phoneDigits(v); }
-
 // 脱敏规则（展示层按 state 开关实时切换；导出/快照与所选脱敏方式保持一致）
 // maskMode（state.maskMode）：first=保留首字（张**/欧***）、edge=保留首+末字（张*三/欧**德）、id=仅会员号（患者列显示会员号）、all=全部隐藏（***）
 // 替换几个字符就有几个 *
@@ -1625,6 +1624,8 @@ function maskDoctor(v) { return maskPersonName(v, state.maskMode); }
 function disp(r, key) {
   const idOnly = state.maskMode === "id";
   if (key === "patient_name") {
+    // 姓名缺失、患者姓名列已被回填为会员号：直接明文显示会员号，不脱敏、不加括号
+    if (r.patient_name && r.member_id && r.patient_name === String(r.member_id)) return r.patient_name;
     if (state.plainName) return r.patient_name || "";
     if (idOnly) return r.member_id ? r.member_id : "—";
     return maskName(r.patient_name);
@@ -1742,7 +1743,7 @@ function buildRows() {
   for (const s of sales) {
     if (!s.sales_time || !s.product) continue;
     const k = keyOf(s);
-    const p = (patMap[k] = patMap[k] || { name: s.patient_name || "未知", phone: s.phone || "", byProduct: {} });
+    const p = (patMap[k] = patMap[k] || { name: s.patient_name || "未知", phone: s.phone || "", member_id: s.member_id || "", byProduct: {} });
     if (s.patient_name) p.name = s.patient_name;
     if (s.phone) p.phone = s.phone;
     const fam = s.product;
@@ -1756,8 +1757,8 @@ function buildRows() {
   }
 
   // ---- 随访按患者索引 ----
-  const fuByKey = {}; // key -> [fu]
-  const fuByName = {};
+  const fuByKey = {}; // 电话数字 -> [fu]
+  const fuByName = {}; // 姓名 -> [fu]
   for (const fu of followups) {
     const k = phoneDigits(fu.phone);
     const nm = (fu.patient_name || "").trim();
@@ -2411,7 +2412,6 @@ function buildSummaryStats(fam) {
     if (state.hospitals.size && !state.hospitals.has(s.hospital || "未知")) continue;
     if (state.pharmacies.size && !state.pharmacies.has(s.pharmacy || "未知")) continue;
     const k = phoneDigits(s.phone) || s.patient_name || "";
-    if (!k) continue;
     (pat[k] = pat[k] || { name: s.patient_name || "", phone: s.phone || "", purchases: [] }).purchases.push({ date: s.sales_time, qty: qtyNum(s.qty) });
   }
   const cycleOf = p => STORE.cycles[p.name || p.phone] || state.stdCycle[fam] || 30;
@@ -3325,8 +3325,11 @@ async function doExport() {
       // 仅会员号模式（id）：患者列导出会员号、医生列空（与列表展示一致）
       // 与界面三组开关保持一致：该字段开关为「不脱敏」时导出明文（所见即所得）
       if (k === "patient_name") {
+        // 姓名缺失、患者姓名列已被回填为会员号：导出明文会员号
+        if (r.patient_name && r.member_id && r.patient_name === String(r.member_id)) return r.patient_name;
         if (state.plainName) return r.patient_name || "";
         if (state.maskMode === "id") return r.member_id || "";
+        if (!r.patient_name || r.patient_name === "未知") return r.member_id ? String(r.member_id) : "—";
         return maskName(r.patient_name);
       }
       if (k === "phone") {
@@ -3405,7 +3408,7 @@ const CB_SUMMARY_TYPE = "跟进回传";
 const CB_COLS = [
   ["任务状态", () => CB_TASK_STATUS],
   ["服务摘要", () => CB_SUMMARY_TYPE],
-  ["患者姓名", r => r.patient_name || ""],
+  ["患者姓名", r => r.patient_name || r.member_id || ""],
   ["联系电话", r => r.phone || ""],
   ["产品", r => r.product || ""],
   ["执行时间", () => refToday()],
@@ -3479,7 +3482,9 @@ async function doSnapshot(desen) {
       delete c._matched; delete c._row_id;
       if (desen) {
         // 与界面三组开关保持一致：该字段开关为「不脱敏」时快照保留明文
-        if (!state.plainName) c.patient_name = maskName(c.patient_name);
+        // 姓名缺失（患者姓名列=会员号）：保持会员号明文，不脱敏；其余按所选脱敏方式
+        if (!state.plainName && c.patient_name && c.patient_name !== c.member_id) c.patient_name = maskName(c.patient_name);
+        else if (!c.patient_name && c.member_id) c.patient_name = c.member_id;
         if (!state.plainPhone) c.phone = maskPhone(c.phone);
         if (!state.plainDoctor) c.physician = maskDoctor(c.physician);
       }
