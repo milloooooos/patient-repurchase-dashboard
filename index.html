@@ -369,7 +369,7 @@
     <div class="pp-list" id="pendingList"></div>
     <div class="pp-actions">
       <button class="btn" id="startBtn" disabled>开始分析</button>
-      <button class="btn ghost" id="clearPendingBtn">清空选择</button>
+      <button class="btn ghost" id="clearPendingBtn" disabled title="只清空上面「已选文件」这一栏（待分析的文件）；不会动「已加载数据」——要清数据请用下面的「清空全部」">清空选择</button>
     </div>
   </div>
 
@@ -1485,6 +1485,20 @@ const DEFAULT_REASON_TREE = [
   { key: "fuFail", label: "随访失败未探寻原因", children: [] },
 ];
 function cloneReasonTree(t) { return (t || []).map(n => ({ key: n.key, label: n.label, children: (n.children || []).map(c => ({ key: c.key, label: c.label, children: [] })) })); }
+// 恢复用户已保存的分类树时，把后来「新增的内置分类」（如 2026-09-23 加的「已挂号」）自动补进来，
+// 否则老用户/老快照会一直用旧树、看不到新分类。顺序按默认树；用户自建的分类保留并追加在末尾。
+function mergeDefaultReasons(tree) {
+  const saved = Array.isArray(tree) ? tree : [];
+  const byKey = {};
+  saved.forEach(n => { if (n && n.key) byKey[n.key] = n; });
+  const out = [];
+  for (const d of DEFAULT_REASON_TREE) {
+    out.push(byKey[d.key] ? byKey[d.key] : cloneReasonTree([d])[0]);
+    delete byKey[d.key];
+  }
+  for (const k in byKey) out.push(byKey[k]);
+  return cloneReasonTree(out);
+}
 // 展平：-> [{ key, label, parent, path }]（path 用于展示，如「脱落·效果不佳」）
 function flattenReasonTree(t) {
   const out = [];
@@ -2857,6 +2871,10 @@ function renderPendingList() {
     ? `共 ${pendingFiles.length} 个文件${unknown ? ` · ${unknown} 个未识别` : ""}`
     : "";
   $("#startBtn").disabled = pendingFiles.length === 0;
+  // 「清空选择」也要跟着置灰：没有已选文件时点它本来就没反应，不置灰会让用户以为按钮坏了
+  // （⚠️ 只清「待分析文件」列表，不动「已加载数据」——那是另一个按钮「清空全部」）
+  const clearBtn = $("#clearPendingBtn");
+  if (clearBtn) clearBtn.disabled = pendingFiles.length === 0;
 }
 
 // 统一上传：一次选多个文件 → 逐个识别类型 → 加入列表（识别失败标「未识别」）
@@ -3573,7 +3591,7 @@ function loadSnapshot(snap) {
   state.longGoneDays = (s.longGoneDays == null || !Number.isFinite(Number(s.longGoneDays))) ? 90 : Number(s.longGoneDays);
   state.sumCustom = !!s.sumCustom; state.sumFrom = s.sumFrom || ""; state.sumTo = s.sumTo || "";
   state.selFam = s.selFam || "";
-  if (s.reasonTree) state.reasonTree = cloneReasonTree(s.reasonTree);
+  if (s.reasonTree) state.reasonTree = mergeDefaultReasons(s.reasonTree); // 自动补上新增的内置分类
   state.fuAdj = s.fuAdj || {};
   SUMMARY.text = snap.summaryText || "";
   // 上传区隐藏
@@ -3676,7 +3694,7 @@ async function restorePersisted() {
   if (blob.qtyScale) state.qtyScale = blob.qtyScale;
   if (blob.cycleAlgo) state.cycleAlgo = blob.cycleAlgo;
   if (blob.cycleTol != null && Number.isFinite(Number(blob.cycleTol))) state.cycleTol = Number(blob.cycleTol);
-  if (blob.reasonTree) state.reasonTree = cloneReasonTree(blob.reasonTree);
+  if (blob.reasonTree) state.reasonTree = mergeDefaultReasons(blob.reasonTree); // 自动补上新增的内置分类
   if (blob.fuAdj) state.fuAdj = blob.fuAdj;
   if (blob.weekEnd != null) state.weekEnd = blob.weekEnd;
   if (blob.weekSel) state.weekSel = blob.weekSel;
