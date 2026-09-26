@@ -856,7 +856,10 @@ const KEYWORD_RULES_MULTI = [
   ["stop_reason", ["停药的原因是什么", "停药的具体原因", "停止用药，主要是谁的建议"]],
   ["dosage", ["的用法用量", "当前用法用量"]],
   // 随访小结 / 患者反馈（多模板措辞不同，跨列取有值者）
-  ["follow_note", ["随访小结", "小结", "随访记录", "患者反馈内容", "患者反馈", "用药反馈", "用药体验", "备注"]],
+  // 「用药体验」单列高优先（用户 2026-09-26：患者反馈内容常有无效内容，门店填的「用药体验」更准）；
+  // 必须排在 follow_note 之前，否则该列会先被 follow_note 占用而取不到。
+  ["follow_note_pref", ["用药体验"]],
+  ["follow_note", ["随访小结", "小结", "随访记录", "患者反馈内容", "患者反馈", "用药反馈", "备注"]],
 ];
 
 function normHeader(h) {
@@ -1147,7 +1150,7 @@ function mapColumns(tableType, rawCols) {
   const assigned = {};
   const used = new Set();
   // 各表生效的字段前缀
-  const FOLLOWUP_FIELDS = ["task_status", "summary_type", "executor", "follow_note", "cancel_reason",
+  const FOLLOWUP_FIELDS = ["task_status", "summary_type", "executor", "follow_note", "follow_note_pref", "cancel_reason",
     "create_time", "plan_time", "exec_time", "task_no", "patient_id", "is_key", "reason_label", "callback_note"];
   let prefix;
   if (tableType === "sales") prefix = f => !f.startsWith("f_") && !f.startsWith("c_");
@@ -1281,7 +1284,7 @@ function normalizeFollowup(row, colmap, sourceFile, sheetName, i) {
     create_time: _gtext(row, colmap, "create_time") || null,
     executor: _gtext(row, colmap, "executor") || null,
     cancel_reason: _gtext(row, colmap, "cancel_reason") || null,
-    follow_note: _gtext(row, colmap, "follow_note") || null,
+    follow_note: (_gtext(row, colmap, "follow_note_pref") || _gtext(row, colmap, "follow_note")) || null, // 「用药体验」优先，其次才是患者反馈内容等（2026-09-26）
     reason_label: _gtext(row, colmap, "reason_label") || null, // 回传表专用：人工选定的未购药原因分类标签
     callback_note: _gtext(row, colmap, "callback_note") || null, // 回传表专用：用户在「跟进备注」列填写的内容
     usage_status: multi("usage_status"),
@@ -1702,8 +1705,13 @@ function normalizePurchases(list) {
   const out = [];
   for (const p of (list || []).slice().sort((a, b) => a.date.localeCompare(b.date))) {
     const last = out[out.length - 1];
-    if (last && last.date === p.date) last.qty += p.qty;
-    else out.push({ date: p.date, qty: p.qty });
+    if (last && last.date === p.date) {
+      last.qty += p.qty;
+      if (p.hospital) last.hospital = p.hospital;       // 同日多条：取该日最后一条
+      if (p.pharmacy) last.pharmacy = p.pharmacy;
+      if (p.physician) last.physician = p.physician;
+      if (p.department) last.department = p.department;
+    } else out.push({ date: p.date, qty: p.qty, hospital: p.hospital || "", pharmacy: p.pharmacy || "", physician: p.physician || "", department: p.department || "" });
   }
   return out;
 }
@@ -1748,12 +1756,8 @@ function buildRows() {
     if (s.phone) p.phone = s.phone;
     const fam = s.product;
     const bp = (p.byProduct[fam] = p.byProduct[fam] || { purchases: [], hospital: s.hospital || "", pharmacy: s.pharmacy || "", physician: s.physician || "", member_id: s.member_id || "", department: s.department || "" });
-    bp.purchases.push({ date: s.sales_time, qty: qtyNum(s.qty) });
-    if (s.hospital) bp.hospital = s.hospital;
-    if (s.pharmacy) bp.pharmacy = s.pharmacy;
+    bp.purchases.push({ date: s.sales_time, qty: qtyNum(s.qty), hospital: s.hospital || "", pharmacy: s.pharmacy || "", physician: s.physician || "", department: s.department || "" });
     if (s.member_id) bp.member_id = s.member_id; // 会员号取最近购药记录的（脱敏方式「仅会员号」用）
-    if (s.department) bp.department = s.department; // 科室取最近购药记录的
-    if (s.physician) bp.physician = s.physician;
   }
 
   // ---- 随访按患者索引 ----
@@ -1784,6 +1788,11 @@ function buildRows() {
       bp.purchases = normalizePurchases(bp.purchases);
       const lastRec = bp.purchases[bp.purchases.length - 1];
       const lastPurchase = lastRec.date;
+      // 医院 / 药房 / 医生 / 科室 一律取「末次购药」那条记录（2026-09-26 用户要求）
+      if (lastRec.hospital) bp.hospital = lastRec.hospital;
+      if (lastRec.pharmacy) bp.pharmacy = lastRec.pharmacy;
+      if (lastRec.physician) bp.physician = lastRec.physician;
+      if (lastRec.department) bp.department = lastRec.department;
       const cycle = cycles[p.name] || state.stdCycle[fam] || 30;
       // 周视图状态判定基准：所选周 W（起止由「周截止日」决定）
       //  当周 [W.start, W.end] 内有购药记录 → 应回购·应回已回（购药事实最优先）
