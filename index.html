@@ -807,6 +807,10 @@ const KEYWORD_RULES = [
   ["member_id",     ["会员号", "会员编号", "会员卡号"]],
   ["patient_name",  ["会员姓名", "客户姓名", "患者姓名", "姓名"]],
   ["phone",         ["会员电话", "手机号", "联系电话", "手机", "电话"]],
+  // 医院：销售表里通常同时存在「首诊医院」（患者首次确诊所在医院）和「医疗单位」（本次购药的就诊医院）。
+  // 我们要的是「医疗单位」，配合 app.js 取末次购药记录 → 「患者末次购药的医疗单位」（2026-09-28 用户确认）。
+  // 「医疗单位」必须写在最前，且该字段在 pipeline 里属于「关键词顺序优先」（见 PRIORITY_FIELDS），
+  // 否则「首诊医院」会因含「医院」而命中数更高被选中。
   ["hospital",      ["医疗单位", "首诊医院", "就诊医院", "医院"]],
   ["pharmacy",      ["药房名称", "门店", "药店名称", "药店", "药房"]],
   ["physician",     ["处方医生", "开单医生", "医生"]],
@@ -1158,12 +1162,17 @@ function mapColumns(tableType, rawCols) {
   else prefix = f => f === "c_patient_name" || f === "cycle_days";
 
   const candList = rawCols.map((rc, idx) => [idx, normHeader(rc)]);
+  // 默认取列规则：「命中关键词数最多」的一列。
+  // 但有些字段必须按关键词的书写顺序取，否则会被「包含关系」带偏，故单列一张「顺序优先」表：
+  //   hospital —— 销售表同时有「首诊医院」和「医疗单位」两列；「首诊医院」因含「医院」命中数=2，
+  //   会压过命中数=1 的「医疗单位」。而我们要取的是「医疗单位」（= 该次购药的就诊医院），
+  //   配合 app.js 取「末次购药」那条记录 → 得到「患者末次购药的医疗单位」。
+  //   落入本表的字段：按 kws 顺序找第一个「有命中列」的关键词即胜出；若某表只有「首诊医院」，则自动回退到它。
+  const PRIORITY_FIELDS = new Set(["hospital"]);
   for (const [field, kws] of rules) {
     if (!prefix(field)) continue;
     if (field === "exec_time") {
       // 执行时间 vs 计划执行时间：排除含「计划」的列
-      const clean = candList.filter(([, nc]) => !used.has(nc) && nc.includes("执行时间") && !nc.includes("计划"));
-      // 注意：candList 的 key 是 idx，这里需要重新按 idx 过滤
       const cand = candList.filter(([idx]) => !used.has(idx) && !normHeader(rawCols[idx]).includes("计划") && normHeader(rawCols[idx]).includes("执行时间"));
       let best = null, bestHits = 0;
       for (const [idx, nc] of cand) {
@@ -1174,12 +1183,25 @@ function mapColumns(tableType, rawCols) {
       if (best !== null) { assigned[field] = best; used.add(best); }
       continue;
     }
-    let best = null, bestHits = 0;
-    for (const [idx, nc] of candList) {
-      if (used.has(idx)) continue;
-      let hits = 0;
-      for (const kw of kws) if (nc.includes(kw)) hits++;
-      if (hits > 0 && hits > bestHits) { bestHits = hits; best = idx; }
+    let best = null;
+    const scoreOf = nc => { let h = 0; for (const kw of kws) if (nc.includes(kw)) h++; return h; };
+    if (PRIORITY_FIELDS.has(field)) {
+      for (const kw of kws) {                       // 关键词顺序 = 优先级
+        let cand = null, candHits = 0;
+        for (const [idx, nc] of candList) {
+          if (used.has(idx) || !nc.includes(kw)) continue;
+          const h = scoreOf(nc);
+          if (h > candHits) { candHits = h; cand = idx; }
+        }
+        if (cand !== null) { best = cand; break; }
+      }
+    } else {
+      let bestHits = 0;
+      for (const [idx, nc] of candList) {
+        if (used.has(idx)) continue;
+        const hits = scoreOf(nc);
+        if (hits > 0 && hits > bestHits) { bestHits = hits; best = idx; }
+      }
     }
     if (best !== null) { assigned[field] = best; used.add(best); }
   }
@@ -3646,8 +3668,9 @@ const PERSIST_KEY = "store_v1";
 // 作用：本机缓存的是「归一化之后的」销售/随访数据，规则升级后旧缓存会继续显示旧口径结果
 //（曾出现「改了代码但界面没变」：随访原因仍把患者反馈内容与用药体验拼在一起）。
 // 版本号不一致 → 自动作废缓存数据，提示重新导入，避免静默算错。
-// 版本历史：1 = 初版（无此字段）；2 = 2026-09-26「用药体验」优先于「患者反馈内容」。
-const NORM_VERSION = 2;
+// 版本历史：1 = 初版（无此字段）；2 = 2026-09-26「用药体验」优先于「患者反馈内容」；
+//           3 = 2026-09-28 医院列改取销售表「医疗单位」（末次购药医疗单位），不再取「首诊医院」。
+const NORM_VERSION = 3;
 function idbOpen() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error("IndexedDB 不可用")); return; }
@@ -3718,7 +3741,7 @@ async function restorePersisted() {
   let blob = null;
   try { blob = await idbGet(PERSIST_KEY); } catch (e) { return false; }
   // 等待期间可能已切到快照模式（快照启动脚本晚于本文件执行），再判一次
-  if (SNAP_MODE || window.__SNAP__) return false;
+  if (SNAP_MODE) return false;
   if (!blob || !Array.isArray(blob.sales) || !blob.sales.length) return false;
   // 旧口径缓存（normVer 不一致）：销售/随访是「旧规则解析」的结果，复用它＝界面显示旧口径 → 直接作废。
   // 只丢「可重新导入的数据」（销售/随访/周期），备注、未购药原因标注、分类树、配置照常保留。
