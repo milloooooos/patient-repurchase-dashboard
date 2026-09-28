@@ -1533,6 +1533,7 @@ const LIST_COLS = [
   ["department", "科室"],
   ["last_purchase", "最近购药"],
   ["qty", "购药数量"],
+  ["total_qty", "累计用药数量"],
   ["cycle_days", "周期(天)"],
   ["fu_time", "匹配随访时间"],
   ["note", "跟进备注"],
@@ -1904,6 +1905,8 @@ function buildRows() {
         member_id: bp.member_id || "", // 会员号（脱敏方式「仅会员号」时患者列显示）
         department: bp.department || "", // 科室（销售底表「处方科室」）
         last_purchase: lastPurchase, qty: lastRec.qty, cycle_days: cycle,
+        // 累计用药数量 = 该患者该品种的历史累计购药总支数（与「购药数量」同口径：经 qtyNum 处理、含同日合并；销退等非正常量走 qtyNum 默认 1）
+        total_qty: bp.purchases.reduce((a, x) => a + (Number(x.qty) || 0), 0),
         // 应回已回行：due_date 显示「预判应购日」（不呈现下次应购时间）；无预判基准显示空（渲染为 —）
         due_date: rowDue,
         next_due: dueDate, // 真实下次应购日（自由时间段「按应购日」筛选用；应回已回行=最近购药之后的下一次）
