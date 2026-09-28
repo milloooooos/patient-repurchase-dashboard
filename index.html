@@ -753,7 +753,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 // 每位患者周期不同（如赛诺菲达必妥），以「患者级周期（用药周期表 / 展开卡手填）」为准，产品级默认值仅作兜底。
 const PRODUCT_FAMILIES = [
   { family: "达必妥", brand: "sanofi", kws: ["度普利尤", "达必妥", "dupixent"], stdCycle: 14, perPatientCycle: true },
-  { family: "利普卓", brand: "az", kws: ["奥拉帕利", "利普卓", "lynparza", "olaparib"], stdCycle: 28 },
+  { family: "利普卓", brand: "az", kws: ["奥拉帕利", "利普卓", "lynparza", "olaparib"], stdCycle: 14 }, // 每盒14天：患者一次购2盒=28天
   { family: "优赫得", brand: "az", kws: ["德曲妥珠", "优赫得", "enhertu", "trastuzumab deruxtecan", "t-dxd"], stdCycle: 21 },
   { family: "凡舒卓", brand: "az", kws: ["贝那利珠", "凡舒卓", "fasenra", "benralizumab"], stdCycle: 28 },
   { family: "泰瑞沙", brand: "az", kws: ["奥希替尼", "泰瑞沙", "tagrisso", "osimertinib"], stdCycle: 30 },
@@ -761,7 +761,7 @@ const PRODUCT_FAMILIES = [
   { family: "沃瑞沙", brand: "az", kws: ["赛沃替尼", "沃瑞沙", "savolitinib"], stdCycle: 21 },
   { family: "荃科得", brand: "az", kws: ["卡匹色替", "荃科得", "capivasertib"], stdCycle: 28 },
   // 说明：以上 stdCycle（每盒/每次对应天数）取自 AZ《2026.1-6 随访底表》真实「用药周期天数」众数：
-  //  泰瑞沙30、利普卓28、英飞凡21(q3w)、沃瑞沙21、凡舒卓28(q4w)、荃科得(卡匹色替)28、达必妥14(q2w,患者级)。
+  //  泰瑞沙30、利普卓14(每盒14天，一次购2盒=28天，按数量开)、英飞凡21(q3w)、沃瑞沙21、凡舒卓28(q4w)、荃科得(卡匹色替)28、达必妥14(q2w,患者级)。
 ];
 
 function normalizeProduct(v) {
@@ -3671,6 +3671,12 @@ const PERSIST_KEY = "store_v1";
 // 版本历史：1 = 初版（无此字段）；2 = 2026-09-26「用药体验」优先于「患者反馈内容」；
 //           3 = 2026-09-28 医院列改取销售表「医疗单位」（末次购药医疗单位），不再取「首诊医院」。
 const NORM_VERSION = 3;
+// 标准周期「内置默认」迁移版本：仅当内置默认值调整时 +1，使本机已缓存的标准周期重新取内置新值。
+// 用户手动改过的周期不受影响（手动值 ≠ 旧默认时不会被覆盖）。
+// 版本历史：1 = 初版（利普卓每盒=28天）；2 = 2026-09-28 利普卓改为每盒=14天（一次购2盒=28天）。
+const CYCLE_VERSION = 2;
+// 旧版本内置默认（仅用于迁移判断：本机若仍是旧默认，则重置让其重新取新默认）
+const CYCLE_DEFAULTS_OLD = { 利普卓: 28 };
 function idbOpen() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error("IndexedDB 不可用")); return; }
@@ -3724,6 +3730,7 @@ async function persistNow() {
   try {
     await idbPut(PERSIST_KEY, {
       normVer: NORM_VERSION,
+      cycleVer: CYCLE_VERSION,
       sales: STORE.sales, followups: STORE.followups, cycles: STORE.cycles,
       notes: STORE.notes, reasonOverrides: STORE.reasonOverrides,
       stdCycle: state.stdCycle, qtyScale: state.qtyScale, cycleAlgo: state.cycleAlgo, cycleTol: state.cycleTol,
@@ -3752,6 +3759,14 @@ async function restorePersisted() {
   STORE.notes = blob.notes || {};
   STORE.reasonOverrides = blob.reasonOverrides || {};
   if (blob.stdCycle) state.stdCycle = blob.stdCycle;
+  // 标准周期内置默认迁移：本机若仍是「旧内置默认」(用户没手动改过)，重置该品种，让 ensureStdCycles 重新取新默认；
+  // 用户手动改过的值（≠ 旧默认）不受影响，可长期保留。
+  const cycleVerStale = (blob.cycleVer || 1) !== CYCLE_VERSION;
+  if (cycleVerStale) {
+    for (const f in CYCLE_DEFAULTS_OLD) {
+      if (state.stdCycle[f] === CYCLE_DEFAULTS_OLD[f]) delete state.stdCycle[f];
+    }
+  }
   if (blob.qtyScale) state.qtyScale = blob.qtyScale;
   if (blob.cycleAlgo) state.cycleAlgo = blob.cycleAlgo;
   if (blob.cycleTol != null && Number.isFinite(Number(blob.cycleTol))) state.cycleTol = Number(blob.cycleTol);
@@ -3780,6 +3795,8 @@ async function restorePersisted() {
     `已自动恢复上次数据（${savedAt}）：销售明细 ${STORE.sales.length} 条${spanTxt(salesSpan())} · 随访任务 ${STORE.followups.length} 条${spanTxt(fuSpan())} · 用药周期 ${Object.keys(STORE.cycles).length} 人 —— 只需再导入「新一周」的表即可增量更新`;
   state.page = 1;
   await refresh();
+  // 迁移版本立刻落盘 → 严格只迁移一次，此后用户手动设的任何周期值都不会再被迁移逻辑触碰。
+  if (cycleVerStale) persistSoon();
   return true;
 }
 // 页面加载即尝试恢复本地数据（脚本位于 body 末尾，DOM 已就绪）
