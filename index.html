@@ -2476,14 +2476,23 @@ function buildSummaryStats(fam) {
   const W = getSummaryRange();
   const nStart = addDays(W.end, 1), nEnd = addDays(W.end, 7); // 下一窗口 = 紧随所选周期的 7 天
   const inP = (d, s, e) => d && d >= s && d <= e;
+  // ⚠️ 回溯截点：应购判定只用「统计期末」之前的购药记录。
+  //    否则用今天的数据回看历史某周，那些「之后才买了药」的人应购日被推后 → 从该周名单里消失，
+  //    同一周在不同时间跑出不同结论（2026-10-20 药师反馈：10.10-10.16 当时 24/19/5，用 10.19 数据只有 21/19/2）。
+  const capDate = W.end;
   // 按患者×品种聚合购药日期（从销售明细，与状态机同一数据源）
   // 跟随所选的医院 / 药房筛选（多选=或）：统计口径随筛选变化
   const pat = {}; // key -> { name, phone, dates: [] }
+  const postDates = {}; // key -> 统计期末之后的购药日期（仅用于说明「期后已补购」）
   for (const s of STORE.sales) {
     if (s.product !== fam || !s.sales_time) continue;
     if (state.hospitals.size && !state.hospitals.has(s.hospital || "未知")) continue;
     if (state.pharmacies.size && !state.pharmacies.has(s.pharmacy || "未知")) continue;
     const k = phoneDigits(s.phone) || s.patient_name || "";
+    if (s.sales_time > capDate) {
+      (postDates[k] = postDates[k] || []).push(s.sales_time);
+      continue;                        // 期末之后的购药不参与本周期应购/已购判定
+    }
     (pat[k] = pat[k] || { name: s.patient_name || "", phone: s.phone || "", purchases: [] }).purchases.push({ date: s.sales_time, qty: qtyNum(s.qty) });
   }
   const cycleOf = p => STORE.cycles[p.name || p.phone] || state.stdCycle[fam] || 30;
@@ -2547,9 +2556,16 @@ function buildSummaryStats(fam) {
   const dTotal = cnt.dropout || 0;
   // 应回购（总集）= 应回未回（应购日∈本周未购）+ 应回已回（当周购药，含提前购药）
   const dueTotal = notBoughtKeys.length + boughtKeys.size;
+  // 「期后已补购」：本周期该买未买、但在统计期末之后又买了的人（用于解释"当时未回、现在看已回"）
+  const lateKeys = notBoughtKeys.filter(k => postDates[k] && postDates[k].length);
+  const lateDates = [];
+  lateKeys.forEach(k => lateDates.push(...postDates[k]));
+  lateDates.sort();
   return { start: W.start, end: W.end, nStart, nEnd, due: dueTotal, bought: boughtKeys.size, notBought: notBoughtKeys.length,
     overdue: overdueKeys.length, longGone: longGoneKeys.length, closed: closedKeys.length,
     notBoughtLabeled: labeled,
+    lateBack: lateKeys.length, lateFrom: lateDates[0] || '', lateTo: lateDates[lateDates.length - 1] || '',
+    stillOut: notBoughtKeys.length - lateKeys.length,
     cnt, dTotal, nextTotal: nextKeys.length, normal, postpone, postponeReasons: [...postponeReasons] };
 }
 
@@ -2608,6 +2624,10 @@ function buildSummaryText(fam) {
   const nNormal = v4("next_normal", st.normal);
   const nPostpone = v4("next_postpone", st.postpone);
   lines.push(`3. 下周预计复购 ${nNormal + nPostpone} 人，预计正常回购 ${nNormal} 人，推迟 ${nPostpone} 人${pReasons}`);
+  if (st.lateBack > 0) {
+    const rg = st.lateFrom === st.lateTo ? st.lateFrom : st.lateFrom + " ~ " + st.lateTo;
+    lines.push(`4. 口径说明：本表按 ${st.end} 当日的购药数据回溯（不受期末之后补购影响）；上述应回未回 ${st.notBought} 人中 ${st.lateBack} 人已在 ${rg} 补购，截至数据日实际仍未购 ${st.stillOut} 人。`);
+  }
   SUMMARY.text = lines.join("\n");
   return { text: SUMMARY.text, st };
 }
@@ -2726,9 +2746,15 @@ function renderSummaryPanel() {
   const nPostpone = v4("next_postpone", st.postpone);
   const line3 = `3. 下周预计复购 <span class="sn-total" title="由正常+推迟之和决定">${nNormal + nPostpone}</span> 人，预计正常回购 <span class="sn-num" data-k="next_normal" title="点击修改人数">${nNormal}</span> 人，推迟 <span class="sn-num" data-k="next_postpone" title="点击修改人数">${nPostpone}</span> 人${pReasons}`;
   const unlabeled = Math.max(0, st.notBought - (st.notBoughtLabeled || 0));
+  // 口径说明行：期末之后才补购的人仍算「当时未回」，但要讲清楚现在已回来几个（否则事后回看会以为数字变了）
+  let line4 = "";
+  if (st.lateBack > 0) {
+    const rg = st.lateFrom === st.lateTo ? st.lateFrom : st.lateFrom + " ~ " + st.lateTo;
+    line4 = `\n<span style="color:#6b7280;font-size:12px">4. 口径说明：本表按 ${esc(String(st.end))} 当日的购药数据回溯（不受期末之后补购影响）；上述应回未回 ${st.notBought} 人中 ${st.lateBack} 人已在 ${esc(rg)} 补购，截至数据日实际仍未购 ${st.stillOut} 人。</span>`;
+  }
   $("#summaryText").innerHTML =
     esc(line1) + "\n2. 未购药原因（应回未回 " + st.notBought + " 人）：" + line2 +
-    (unlabeled ? `<span class="sn-miss">；另 ${unlabeled} 人暂未标注</span>` : "") + "；\n" + line3;
+    (unlabeled ? `<span class="sn-miss">；另 ${unlabeled} 人暂未标注</span>` : "") + "；\n" + line3 + line4;
   // 点击数字 → 原地变输入框，回车/失焦保存（Esc 取消）
   $("#summaryText").onclick = (e) => {
     if (SNAP_MODE) return;
