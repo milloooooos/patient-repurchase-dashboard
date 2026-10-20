@@ -815,6 +815,9 @@ const KEYWORD_RULES = [
   ["pharmacy",      ["药房名称", "门店", "药店名称", "药店", "药房"]],
   ["physician",     ["处方医生", "开单医生", "医生"]],
   ["department",    ["处方科室", "科室", "就诊科室"]],
+  // 收款方式：患者末次购药的收款方式（如「扫一扫,南充市医保统筹」＝扫码支付＋医保统筹）。
+  // 含「医保/统筹/公费/大病」等视为医保患者，其余视为自费（见 app.js payKind）。2026-10-20 用户需求。
+  ["payment",       ["收款方式", "支付方式", "付款方式", "结算方式"]],
   ["indication",    ["适应症", "临床诊断", "诊断"]],
   ["age",           ["年龄"]],
   ["gender",        ["性别"]],
@@ -1279,6 +1282,7 @@ function normalizeSales(row, colmap, sourceFile, sheetName, i) {
     pharmacy: _gtext(row, colmap, "pharmacy") || null,
     physician: _gtext(row, colmap, "physician") || null,
     department: _gtext(row, colmap, "department") || null,
+    payment: _gtext(row, colmap, "payment") || null,
     indication: _gtext(row, colmap, "indication") || null,
     age: _gtext(row, colmap, "age") || null,
     gender: _gtext(row, colmap, "gender") || null,
@@ -1553,6 +1557,7 @@ const LIST_COLS = [
   ["hospital", "医院"],
   ["pharmacy", "药房"],
   ["department", "科室"],
+  ["payment_type", "收款方式"],
   ["last_purchase", "最近购药"],
   ["qty", "购药数量"],
   ["total_qty", "累计用药数量"],
@@ -1649,6 +1654,14 @@ function maskPhone(v) {
 // 医生与姓名共用同一脱敏方式（保持一致）
 function maskDoctor(v) { return maskPersonName(v, state.maskMode); }
 // 按当前脱敏开关取展示值（mode=id「仅会员号」：患者列=会员号、医生列无会员身份显示 —）
+// 收款方式 → 医保 / 自费。销售底表的取值是「支付渠道,医保类型」的复合串，
+// 例：扫一扫,南充市医保统筹 / 银行卡,本地居民医保统筹 / 现金,本地居民医保统筹 → 医保；
+//     仅「扫一扫」「微信支付」「现金」「银行卡」等无医保字样 → 自费。
+function payKind(v) {
+  const s = String(v || "");
+  if (!s.trim()) return "";
+  return /医保|统筹|公费|基本医疗|大病|公务员|离休|优抚|工伤/.test(s) ? "医保" : "自费";
+}
 function disp(r, key) {
   const idOnly = state.maskMode === "id";
   if (key === "patient_name") {
@@ -1659,6 +1672,13 @@ function disp(r, key) {
     return maskName(r.patient_name);
   }
   if (key === "phone") return state.plainPhone ? (r.phone || "") : maskPhone(r.phone);
+  // 收款方式：导出/快照里写成「医保：扫一扫,南充市医保统筹」，脱离页面也能分清医保/自费
+  if (key === "payment_type") {
+    const raw = r.payment_raw || "";
+    if (!raw) return "";
+    const kind = payKind(raw);
+    return kind ? kind + "：" + raw : raw;
+  }
   // 医生：独立开关（state.plainDoctor）；脱敏时的方式与姓名共用（state.maskMode）
   if (key === "physician") {
     if (state.plainDoctor) return r.physician || "";
@@ -1736,7 +1756,8 @@ function normalizePurchases(list) {
       if (p.pharmacy) last.pharmacy = p.pharmacy;
       if (p.physician) last.physician = p.physician;
       if (p.department) last.department = p.department;
-    } else out.push({ date: p.date, qty: p.qty, hospital: p.hospital || "", pharmacy: p.pharmacy || "", physician: p.physician || "", department: p.department || "" });
+      if (p.payment) last.payment = p.payment;            // 收款方式（末次购药口径）
+    } else out.push({ date: p.date, qty: p.qty, hospital: p.hospital || "", pharmacy: p.pharmacy || "", physician: p.physician || "", department: p.department || "", payment: p.payment || "" });
   }
   return out;
 }
@@ -1781,7 +1802,7 @@ function buildRows() {
     if (s.phone) p.phone = s.phone;
     const fam = s.product;
     const bp = (p.byProduct[fam] = p.byProduct[fam] || { purchases: [], hospital: s.hospital || "", pharmacy: s.pharmacy || "", physician: s.physician || "", member_id: s.member_id || "", department: s.department || "" });
-    bp.purchases.push({ date: s.sales_time, qty: qtyNum(s.qty), hospital: s.hospital || "", pharmacy: s.pharmacy || "", physician: s.physician || "", department: s.department || "" });
+    bp.purchases.push({ date: s.sales_time, qty: qtyNum(s.qty), hospital: s.hospital || "", pharmacy: s.pharmacy || "", physician: s.physician || "", department: s.department || "", payment: s.payment || "" });
     if (s.member_id) bp.member_id = s.member_id; // 会员号取最近购药记录的（脱敏方式「仅会员号」用）
   }
 
@@ -1818,6 +1839,8 @@ function buildRows() {
       if (lastRec.pharmacy) bp.pharmacy = lastRec.pharmacy;
       if (lastRec.physician) bp.physician = lastRec.physician;
       if (lastRec.department) bp.department = lastRec.department;
+      // 收款方式同样取「末次购药」那条 → 药师据此分辨医保 / 自费（2026-10-20）
+      if (lastRec.payment) bp.payment = lastRec.payment;
       const cycle = cycles[p.name] || state.stdCycle[fam] || 30;
       // 周视图状态判定基准：所选周 W（起止由「周截止日」决定）
       //  当周 [W.start, W.end] 内有购药记录 → 应回购·应回已回（购药事实最优先）
@@ -1928,6 +1951,7 @@ function buildRows() {
         hospital: bp.hospital, pharmacy: bp.pharmacy,
         member_id: bp.member_id || "", // 会员号（脱敏方式「仅会员号」时患者列显示）
         department: bp.department || "", // 科室（销售底表「处方科室」）
+        payment_raw: bp.payment || "",   // 收款方式原文（末次购药）；payKind() 判医保/自费
         last_purchase: lastPurchase, qty: lastRec.qty, cycle_days: cycle,
         // 累计用药数量 = 该患者该品种的历史累计购药总支数（与「购药数量」同口径：经 qtyNum 处理、含同日合并；销退等非正常量走 qtyNum 默认 1）
         total_qty: bp.purchases.reduce((a, x) => a + (Number(x.qty) || 0), 0),
@@ -2300,6 +2324,18 @@ function rowHtml(r, idx, cols) {
       const clickable = SNAP_MODE ? "" : " clickable";
       const title = SNAP_MODE ? "" : "title=\"点击标注未购药原因\"";
       return `<td><span class="tag reason-tag${clickable}" data-key="${esc(noteKey(r))}" data-reason="${esc(r.reason || "")}" style="background:${color};cursor:${SNAP_MODE ? "default" : "pointer"}" ${title}>${esc(label)}</span></td>`;
+    }
+    if (key === "payment_type") {
+      // 收款方式：先给「医保 / 自费」标签，再附原文（窄列截断，title 可看全）
+      const raw = r.payment_raw || "";
+      if (!raw) return `<td><span class="muted">—</span></td>`;
+      const kind = payKind(raw);
+      const isYb = kind === "医保";
+      const tagStyle = `display:inline-block;padding:1px 6px;border-radius:4px;font-size:12px;font-weight:600;white-space:nowrap;`
+        + (isYb ? "background:#e7f0ff;color:#0F68F6" : "background:#fff1e6;color:#d9480f");
+      const brief = raw.length > 10 ? raw.slice(0, 10) + "…" : raw;
+      return `<td><span style="${tagStyle}">${esc(kind)}</span>`
+        + `<span class="muted" style="font-size:11px;margin-left:4px" title="${esc(raw)}">${esc(brief)}</span></td>`;
     }
     if (key === "product") return `<td><span class="tag-prod">${esc(disp(r, key))}</span></td>`;
     if (key === "note") {
@@ -3396,6 +3432,8 @@ async function doExport() {
       if (k === "days_to_due" && r.repur_part === "应回已回") {
         return r.purchase_days_ago != null ? r.purchase_days_ago + "天前已购药" : "";
       }
+      // 收款方式：导出成「医保：扫一扫,南充市医保统筹」，脱离页面也能分清医保/自费
+      if (k === "payment_type") return disp(r, k);
       return r[k] == null ? "" : r[k];
     });
     vals.push(r.fu_note || "");
@@ -3425,8 +3463,8 @@ async function doExport() {
       row.getCell(idxSig + 1).font = { color: { argb: EXPORT_SIG_FONT[r.fu_signal_kind] } };
     }
   }
-  // 列宽（19 个 LIST_COLS 列 + 随访小结）
-  const widths = [10, 14, 10, 10, 22, 18, 12, 10, 10, 12, 10, 14, 18, 10, 10, 10, 24, 22, 40];
+  // 列宽（19 个 LIST_COLS 列 + 随访小结；2026-10-20 在「科室」后插入「收款方式」）
+  const widths = [10, 14, 10, 10, 22, 18, 12, 10, 10, 12, 10, 14, 16, 18, 10, 10, 10, 24, 22, 40];
   ws.columns.forEach((c, i) => { c.width = widths[i] || 12; });
   // 冻结首行
   ws.views = [{ state: "frozen", ySplit: 1 }];
@@ -3685,14 +3723,33 @@ const PERSIST_KEY = "store_v1";
 //（曾出现「改了代码但界面没变」：随访原因仍把患者反馈内容与用药体验拼在一起）。
 // 版本号不一致 → 自动作废缓存数据，提示重新导入，避免静默算错。
 // 版本历史：1 = 初版（无此字段）；2 = 2026-09-26「用药体验」优先于「患者反馈内容」；
-//           3 = 2026-09-28 医院列改取销售表「医疗单位」（末次购药医疗单位），不再取「首诊医院」。
-const NORM_VERSION = 3;
+//           3 = 2026-09-28 医院列改取销售表「医疗单位」（末次购药医疗单位），不再取「首诊医院」；
+//           4 = 2026-10-20 新增「收款方式」列（末次购药收款方式 + 医保/自费判定）。
+const NORM_VERSION = 4;
 // 标准周期「内置默认」迁移版本：仅当内置默认值调整时 +1，使本机已缓存的标准周期重新取内置新值。
 // 用户手动改过的周期不受影响（手动值 ≠ 旧默认时不会被覆盖）。
 // 版本历史：1 = 初版（利普卓每盒=28天）；2 = 2026-09-28 利普卓改为每盒=14天（一次购2盒=28天）。
 const CYCLE_VERSION = 2;
 // 旧版本内置默认（仅用于迁移判断：本机若仍是旧默认，则重置让其重新取新默认）
 const CYCLE_DEFAULTS_OLD = { 利普卓: 28 };
+
+/* ───── 更新说明（2026-10-20 用户要求：更新后要让药师知道「这次改了什么」，别只闪一下让人重导表格）─────
+   写法约定：ver 必须与 NORM_VERSION 对应（同一次解析口径变更就 +1）；items 用一两句人话，别写技术术语。 */
+const UPDATE_LOG = [
+  { ver: 4, date: "2026-10-20", items: [
+    "<b>新增「收款方式」列</b>（患者明细里，在「科室」右边）：取该患者<b>最近一次购药</b>的收款方式，并自动标注 <b>医保 / 自费</b>——只看这个标签就能分清患者类型；鼠标停在后面的小字上可看原始收款方式（如「扫一扫,南充市医保统筹」）。",
+    "因为是新增字段，本机旧数据缺这一列，所以<b>需要重新导入一次</b>表格；之后改用增量导入即可。",
+    "以后每次功能更新，页面都会像这样弹一次「这次改了什么」，不再只提示“口径更新过”。",
+  ]},
+  { ver: 3, date: "2026-09-28", items: [
+    "「医院」列改为取销售表的<b>末次购药医疗单位</b>（原来取首诊医院）。",
+    "利普卓标准周期由 28 天改为 <b>14 天/盒</b>（一次购 2 盒 = 28 天）。",
+  ]},
+  { ver: 2, date: "2026-09-26", items: [
+    "随访原因优先取「<b>用药体验</b>」列（原来取患者反馈内容，常有无效信息）。",
+  ]},
+];
+const APP_VERSION_LABEL = "v" + NORM_VERSION + " · " + UPDATE_LOG[0].date;
 function idbOpen() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error("IndexedDB 不可用")); return; }
@@ -3730,16 +3787,96 @@ async function idbDel(key) {
   });
 }
 let persistTimer = null;
+// 恢复结果摘要（供「更新说明」判断：本机有没有历史数据 / 是否因版本变更被清空）
+let LAST_RESTORE = { hadBlob: false, stale: false, staleVer: null };
 function persistSoon() { clearTimeout(persistTimer); persistTimer = setTimeout(() => { persistNow(); }, 400); }
 // 旧口径缓存被作废时，在上传区给一条醒目提示（board 此时是隐藏的，提示必须放在上传区）
-function showStaleNotice() {
+// 2026-10-20：不再只写“口径更新过”，而是列出「这次改了什么」，并可再次打开更新说明。
+function showStaleNotice(fromVer) {
   if ($("#staleNotice")) return;
   const el = document.createElement("div");
   el.id = "staleNotice";
   el.setAttribute("style", "margin:12px 0;padding:12px 14px;border-radius:10px;background:#fff7e6;border:1px solid #ffd591;color:#874d00;font-size:13px;line-height:1.8");
-  el.innerHTML = "<b>已自动清空本机保存的旧数据</b> —— 看板的解析口径更新过了（例如随访内容改为「用药体验」优先），本机存的还是<b>旧口径解析</b>的结果，继续用会显示过时内容。<br>已清空「销售/随访」数据；<b>你填的备注、未购药原因标注都保留着</b>。<br>请按老样子<b>重新导入表格</b>（销售明细 + 随访任务）即可。";
+  const latest = UPDATE_LOG[0];
+  el.innerHTML = "<b>看板已更新（" + (fromVer ? "v" + fromVer + " → " : "") + "v" + NORM_VERSION + "）</b>，本机旧数据已自动清空。"
+    + "原因：<b>解析规则变了</b>，旧数据是按老规则解析的，继续用会显示过时结果。<br>"
+    + "<b>你填的备注、未购药原因标注都保留着</b>；请按老样子<b>重新导入表格</b>（销售明细 + 随访任务）即可。<br>"
+    + "<span style=\"display:inline-block;margin-top:6px;padding:8px 10px;background:#fff;border-radius:8px;border:1px solid #ffe0b2\">"
+    + "<b>本次更新（" + latest.date + "）：</b>" + latest.items[0].replace(/<\/?b>/g, "")
+    + "</span><br><a href=\"javascript:void(0)\" id=\"staleMore\" style=\"color:#0F68F6;text-decoration:none;font-size:12px\">查看完整更新说明 ›</a>";
   const pp = $("#pendingPanel");
   if (pp && pp.parentNode) pp.parentNode.insertBefore(el, pp);
+  const more = $("#staleMore");
+  if (more) more.onclick = () => showUpdateModal({ fromVer: fromVer, cleared: true });
+}
+
+// 每个新版本「首次打开」都弹一次更新说明（不再只依赖“旧数据被清空”这条路径：
+// 药师本机若没有缓存数据，旧逻辑永远不会弹，用户就会觉得“没有提示”）。
+// 触发条件：localStorage 里记的已读版本 ≠ 当前 NORM_VERSION。
+const SEEN_VER_KEY = "pmh_seen_ver";
+function maybeShowUpdateOnLoad() {
+  if (SNAP_MODE) return;
+  let seen = null;
+  try { seen = localStorage.getItem(SEEN_VER_KEY); } catch (e) {}
+  if (String(seen) === String(NORM_VERSION)) return;
+  try { localStorage.setItem(SEEN_VER_KEY, String(NORM_VERSION)); } catch (e) {}
+  // 从来没打开过（无记录）且本机也没有历史数据 → 纯新用户，不弹“更新说明”
+  if (seen == null && !LAST_RESTORE.hadBlob) return;
+  const fromVer = seen != null ? Number(seen)
+    : (LAST_RESTORE.stale ? Number(LAST_RESTORE.staleVer) : NORM_VERSION - 1);
+  const cleared = !!LAST_RESTORE.stale;
+  setTimeout(() => showUpdateModal({ fromVer: isFinite(fromVer) ? fromVer : null, cleared: cleared }), 500);
+}
+
+// 更新说明弹窗：fromVer 有值时只列「比它新」的版本；cleared=true 时附“为何要重导”说明
+function showUpdateModal(opts) {
+  opts = opts || {};
+  if (document.getElementById("updModal")) return;
+  const logs = UPDATE_LOG.filter(x => opts.fromVer == null || Number(x.ver) > Number(opts.fromVer));
+  const list = logs.length ? logs : [UPDATE_LOG[0]];
+  const body = list.map(v =>
+    `<div style="margin-bottom:14px">`
+    + `<div style="font-size:12px;color:#8a94a6;margin-bottom:5px">${v.date} · v${v.ver}</div>`
+    + `<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.95;color:#1f2937">`
+    + v.items.map(t => `<li>${t}</li>`).join("")
+    + `</ul></div>`).join("");
+  const note = opts.cleared
+    ? `<div style="background:#fff7e6;border:1px solid #ffd591;color:#874d00;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.8;margin-top:4px">`
+      + `因为<b>解析规则变了</b>，本机缓存的旧数据已自动清空（不清空会显示按旧规则算出的结果）。`
+      + `<b>你的备注、未购药原因标注都保留着</b>，重新导入「销售明细 + 随访任务」即可。</div>`
+    : "";
+  const el = document.createElement("div");
+  el.id = "updModal";
+  el.setAttribute("style", "position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(15,23,42,.45);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px");
+  el.innerHTML =
+    `<div style="background:#fff;border-radius:14px;max-width:600px;width:100%;max-height:82vh;overflow:auto;box-shadow:0 18px 48px rgba(15,23,42,.28)">`
+    + `<div style="padding:18px 22px 12px;border-bottom:1px solid #eef1f6">
+         <div style="font-size:17px;font-weight:700;color:#0F68F6">看板更新说明${opts.fromVer ? "（v" + opts.fromVer + " → v" + NORM_VERSION + "）" : ""}</div>
+         <div style="font-size:12px;color:#8a94a6;margin-top:4px">这次改了什么 ↓　当前版本 ${APP_VERSION_LABEL}</div>
+       </div>`
+    + `<div style="padding:16px 22px 4px">${body}${note}</div>`
+    + `<div style="padding:6px 22px 18px;display:flex;justify-content:flex-end">
+         <button id="updClose" style="border:0;background:#0F68F6;color:#fff;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px;cursor:pointer">${opts.cleared ? "知道了，去重新导入" : "知道了"}</button>
+       </div></div>`;
+  document.body.appendChild(el);
+  const close = () => { if (el.parentNode) el.parentNode.removeChild(el); };
+  el.querySelector("#updClose").onclick = close;
+  el.onclick = e => { if (e.target === el) close(); };
+  const onKey = e => { if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); } };
+  document.addEventListener("keydown", onKey);
+}
+
+// 常驻入口：上传区下方一行「本次更新了什么？」，药师随时能回看（不依赖是否触发清库）
+function ensureUpdateLink() {
+  if (SNAP_MODE || document.getElementById("updLink")) return;
+  const pp = $("#pendingPanel");
+  if (!pp || !pp.parentNode) return;
+  const box = document.createElement("div");
+  box.id = "updLink";
+  box.setAttribute("style", "margin:6px 0 0;text-align:right;font-size:12px;color:#8a94a6");
+  box.innerHTML = `<a href="javascript:void(0)" style="color:#0F68F6;text-decoration:none">本次更新了什么？（${APP_VERSION_LABEL}）</a>`;
+  box.querySelector("a").onclick = () => showUpdateModal({});
+  pp.parentNode.insertBefore(box, pp.nextSibling);
 }
 async function persistNow() {
   if (SNAP_MODE) return; // 快照为只读视图，不回写本地
@@ -3765,10 +3902,15 @@ async function restorePersisted() {
   try { blob = await idbGet(PERSIST_KEY); } catch (e) { return false; }
   // 等待期间可能已切到快照模式（快照启动脚本晚于本文件执行），再判一次
   if (SNAP_MODE) return false;
-  if (!blob || !Array.isArray(blob.sales) || !blob.sales.length) return false;
+  if (!blob || !Array.isArray(blob.sales) || !blob.sales.length) {
+    LAST_RESTORE = { hadBlob: false, stale: false, staleVer: blob ? blob.normVer : null };
+    return false;
+  }
+  LAST_RESTORE = { hadBlob: true, stale: false, staleVer: blob.normVer };
   // 旧口径缓存（normVer 不一致）：销售/随访是「旧规则解析」的结果，复用它＝界面显示旧口径 → 直接作废。
   // 只丢「可重新导入的数据」（销售/随访/周期），备注、未购药原因标注、分类树、配置照常保留。
   const stale = blob.normVer !== NORM_VERSION;
+  LAST_RESTORE.stale = stale;
   STORE.sales = stale ? [] : (blob.sales || []);
   STORE.followups = stale ? [] : (blob.followups || []);
   STORE.cycles = stale ? {} : (blob.cycles || {});
@@ -3799,7 +3941,7 @@ async function restorePersisted() {
     // 旧口径：数据已作废（上方已置空），仅保留备注/标注/配置，并提示重新导入
     renderCycleInputs();
     persistSoon();      // 立刻以「新口径版本 + 空数据」落盘，下次打开不再提示
-    showStaleNotice();
+    showStaleNotice(blob.normVer);
     return false;
   }
   const products = [...new Set(STORE.sales.map(s => s.product).filter(Boolean))];
@@ -3818,7 +3960,9 @@ async function restorePersisted() {
 // 页面加载即尝试恢复本地数据（脚本位于 body 末尾，DOM 已就绪）
 (async () => {
   try {
+    ensureUpdateLink();          // 常驻入口：上传区下方「本次更新了什么？」
     const restored = await restorePersisted();
+    maybeShowUpdateOnLoad();     // 每个新版本首次打开弹一次「这次改了什么」
     // 老用户：已有数据但还没看过「怎么看结果」→ 补讲一次
     if (restored && window.__tourNeedResult && window.__tourNeedResult() && window.__tourStart) {
       setTimeout(() => { if (window.__tourStart) window.__tourStart("result"); }, 900);
@@ -4009,7 +4153,7 @@ const TOUR_STEPS = {
   }
 })();
 
-window.AppCore = { loadSnapshot, buildRows, filterRows, buildSummary, doExport, doExportCallback, callbackRows, applyCallbackRecords, reasonKeyFromLabel, disp, qtyNum, qtyScales, coverDays, addDays, normalizePurchases, stockEndAfter, renderCycleCfg, LIST_COLS, STORE, state, DATA, refresh, ensureStdCycles, renderCycleInputs, renderTable, renderPagination, buildSummaryStats, buildSummaryText, buildAllFamsSummaryText, renderSummaryPanel, getWeekRange, renderWeekBar, refToday, WEEK_LABEL, classifyFuReason: M.classifyFuReason, DEFAULT_REASON_TREE, cloneReasonTree, flattenReasonTree, reasonLabel, renderReasonManager, addReason, addReasonChild, renameReason, removeReason };
+window.AppCore = { loadSnapshot, buildRows, filterRows, buildSummary, doExport, doExportCallback, callbackRows, applyCallbackRecords, reasonKeyFromLabel, disp, payKind, qtyNum, qtyScales, coverDays, addDays, normalizePurchases, stockEndAfter, renderCycleCfg, LIST_COLS, STORE, state, DATA, refresh, ensureStdCycles, renderCycleInputs, renderTable, renderPagination, buildSummaryStats, buildSummaryText, buildAllFamsSummaryText, renderSummaryPanel, getWeekRange, renderWeekBar, refToday, WEEK_LABEL, classifyFuReason: M.classifyFuReason, DEFAULT_REASON_TREE, cloneReasonTree, flattenReasonTree, reasonLabel, renderReasonManager, addReason, addReasonChild, renameReason, removeReason, showUpdateModal, UPDATE_LOG, APP_VERSION_LABEL };
 })();
 
 </script>
