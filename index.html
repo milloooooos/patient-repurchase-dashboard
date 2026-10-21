@@ -3860,6 +3860,9 @@ const PERSIST_KEY = "store_v1";
 //           3 = 2026-09-28 医院列改取销售表「医疗单位」（末次购药医疗单位），不再取「首诊医院」；
 //           4 = 2026-10-20 新增「收款方式」列（末次购药收款方式 + 医保/自费判定）。
 const NORM_VERSION = 4;
+// 看板「功能版本」：每次前端功能变化 +1，用于「更新说明」弹窗/入口文案。
+// 与 NORM_VERSION 分开的原因：新增功能不需要重导数据，不能因为改功能就清空药师本机数据。
+const APP_VERSION = 5;
 // 标准周期「内置默认」迁移版本：仅当内置默认值调整时 +1，使本机已缓存的标准周期重新取内置新值。
 // 用户手动改过的周期不受影响（手动值 ≠ 旧默认时不会被覆盖）。
 // 版本历史：1 = 初版（利普卓每盒=28天）；2 = 2026-09-28 利普卓改为每盒=14天（一次购2盒=28天）。
@@ -3870,7 +3873,13 @@ const CYCLE_DEFAULTS_OLD = { 利普卓: 28 };
 /* ───── 更新说明（2026-10-20 用户要求：更新后要让药师知道「这次改了什么」，别只闪一下让人重导表格）─────
    写法约定：ver 必须与 NORM_VERSION 对应（同一次解析口径变更就 +1）；items 用一两句人话，别写技术术语。 */
 const UPDATE_LOG = [
-  { ver: 4, date: "2026-10-20", items: [
+  { ver: 5, date: "2026-10-21", items: [
+    "<b>新增「一句话筛选」</b>：页面顶部多了一个输入框，直接写「本周还没买药的泰瑞沙」「上周已回购的」「10月1日到10月20日 推迟购药」这类话，按回车就能筛出名单——不太会用上面那些多选框也能查。旁边有 6 个常用例子，点一下就行。",
+    "<b>小结里的数字可以点开看名单</b>：点「应回未回 7 人」「推迟购药 3 人」「另 4 人暂未标注」这些数字，下面表格就只剩这几个人，不用自己再去筛。<b>原来点数字是改人数</b>，现在改成先点提示条上的「修正人数」，再点数字才是改人数。",
+    "<b>修了一个周报口径问题</b>：以前用最新数据回看历史某一周时，如果患者在那周之后才补购，他会从那一周的「应回未回」里消失，导致同一周不同时间看数字不一样。现在统一按「那一周结束时」的数据算，数字可复现；若之后有人补购，小结会多一行说明（几人已补购、实际还有几人没买）。",
+    "以上改动<b>都不需要重新导入表格</b>，打开页面刷新一下就是新功能。",
+  ]},
+  { ver: 4, date: "2026-10-20", norm: true, items: [
     "<b>新增「收款方式」列</b>（患者明细里，在「科室」右边）：取该患者<b>最近一次购药</b>的收款方式，并自动标注 <b>医保 / 自费</b>——只看这个标签就能分清患者类型；鼠标停在后面的小字上可看原始收款方式（如「扫一扫,南充市医保统筹」）。",
     "因为是新增字段，本机旧数据缺这一列，所以<b>需要重新导入一次</b>表格；之后改用增量导入即可。",
     "以后每次功能更新，页面都会像这样弹一次「这次改了什么」，不再只提示“口径更新过”。",
@@ -3883,7 +3892,7 @@ const UPDATE_LOG = [
     "随访原因优先取「<b>用药体验</b>」列（原来取患者反馈内容，常有无效信息）。",
   ]},
 ];
-const APP_VERSION_LABEL = "v" + NORM_VERSION + " · " + UPDATE_LOG[0].date;
+const APP_VERSION_LABEL = "v" + APP_VERSION + " · " + UPDATE_LOG[0].date;
 function idbOpen() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error("IndexedDB 不可用")); return; }
@@ -3931,8 +3940,9 @@ function showStaleNotice(fromVer) {
   const el = document.createElement("div");
   el.id = "staleNotice";
   el.setAttribute("style", "margin:12px 0;padding:12px 14px;border-radius:10px;background:#fff7e6;border:1px solid #ffd591;color:#874d00;font-size:13px;line-height:1.8");
-  const latest = UPDATE_LOG[0];
-  el.innerHTML = "<b>看板已更新（" + (fromVer ? "v" + fromVer + " → " : "") + "v" + NORM_VERSION + "）</b>，本机旧数据已自动清空。"
+  // 这条提示只在「解析规则变了、必须重导」时出现 → 取最近一条带 norm 标记的日志，而不是最新的功能更新条目
+  const latest = UPDATE_LOG.find(x => x.norm) || UPDATE_LOG[0];
+  el.innerHTML = "<b>看板已更新（" + (fromVer ? "v" + fromVer + " → " : "") + "v" + APP_VERSION + "）</b>，本机旧数据已自动清空。"
     + "原因：<b>解析规则变了</b>，旧数据是按老规则解析的，继续用会显示过时结果。<br>"
     + "<b>你填的备注、未购药原因标注都保留着</b>；请按老样子<b>重新导入表格</b>（销售明细 + 随访任务）即可。<br>"
     + "<span style=\"display:inline-block;margin-top:6px;padding:8px 10px;background:#fff;border-radius:8px;border:1px solid #ffe0b2\">"
@@ -3952,12 +3962,12 @@ function maybeShowUpdateOnLoad() {
   if (SNAP_MODE) return;
   let seen = null;
   try { seen = localStorage.getItem(SEEN_VER_KEY); } catch (e) {}
-  if (String(seen) === String(NORM_VERSION)) return;
-  try { localStorage.setItem(SEEN_VER_KEY, String(NORM_VERSION)); } catch (e) {}
+  if (String(seen) === String(APP_VERSION)) return;
+  try { localStorage.setItem(SEEN_VER_KEY, String(APP_VERSION)); } catch (e) {}
   // 从来没打开过（无记录）且本机也没有历史数据 → 纯新用户，不弹“更新说明”
   if (seen == null && !LAST_RESTORE.hadBlob) return;
   const fromVer = seen != null ? Number(seen)
-    : (LAST_RESTORE.stale ? Number(LAST_RESTORE.staleVer) : NORM_VERSION - 1);
+    : (LAST_RESTORE.stale ? Number(LAST_RESTORE.staleVer) : APP_VERSION - 1);
   const cleared = !!LAST_RESTORE.stale;
   setTimeout(() => showUpdateModal({ fromVer: isFinite(fromVer) ? fromVer : null, cleared: cleared }), 500);
 }
@@ -3985,7 +3995,7 @@ function showUpdateModal(opts) {
   el.innerHTML =
     `<div style="background:#fff;border-radius:14px;max-width:600px;width:100%;max-height:82vh;overflow:auto;box-shadow:0 18px 48px rgba(15,23,42,.28)">`
     + `<div style="padding:18px 22px 12px;border-bottom:1px solid #eef1f6">
-         <div style="font-size:17px;font-weight:700;color:#0F68F6">看板更新说明${opts.fromVer ? "（v" + opts.fromVer + " → v" + NORM_VERSION + "）" : ""}</div>
+         <div style="font-size:17px;font-weight:700;color:#0F68F6">看板更新说明${opts.fromVer ? "（v" + opts.fromVer + " → v" + APP_VERSION + "）" : ""}</div>
          <div style="font-size:12px;color:#8a94a6;margin-top:4px">这次改了什么 ↓　当前版本 ${APP_VERSION_LABEL}</div>
        </div>`
     + `<div style="padding:16px 22px 4px">${body}${note}</div>`
