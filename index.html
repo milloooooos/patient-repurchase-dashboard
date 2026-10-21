@@ -131,6 +131,23 @@
   .filterbar .export{background:#fff;color:var(--brand);border:1px solid var(--brand);
     border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;transition:.12s}
   .filterbar .export:hover{background:var(--brand);color:#fff}
+  /* 一句话筛选 */
+  .askbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#fff;
+    border:1px solid var(--line);border-left:3px solid var(--brand);border-radius:10px;
+    padding:10px 12px;margin:0 0 10px}
+  .askbar .ask-lbl{font-size:13px;font-weight:700;color:var(--brand);white-space:nowrap}
+  .askbar #askInput{flex:1 1 320px;min-width:200px;padding:8px 10px;border:1px solid var(--line);
+    border-radius:8px;font:inherit;font-size:13px}
+  .askbar #askInput:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(15,104,246,.08)}
+  .askbar .ask-ex{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+  .askbar .ask-ex .chip{cursor:pointer;font-size:12px;padding:3px 9px;border-radius:999px;
+    border:1px solid var(--line);background:#fbfcfe;color:var(--muted);transition:.12s}
+  .askbar .ask-ex .chip:hover{border-color:var(--brand);color:var(--brand);background:#f2f7ff}
+  .ask-res{display:none;width:100%;font-size:12px;line-height:1.7;color:#1f4d8f;
+    background:#f2f7ff;border:1px solid #cfe0ff;border-radius:8px;padding:6px 10px}
+  .ask-res.on{display:block}
+  .ask-res b{color:var(--brand)}
+  .ask-res .warn{color:#c92a2a}
   .filterbar .export.snap{background:#fff;color:var(--warn);border-color:var(--warn)}
   .filterbar .export.snap:hover{background:var(--warn);color:#fff}
   /* 脱敏切换 + 列显隐 */
@@ -321,6 +338,11 @@
   .sn-num:hover{background:var(--brand-soft)}
   .sn-total{font-weight:700}
   .sn-miss{color:var(--muted);font-weight:400}
+  /* 小结里可下钻的数字：点一下看这批人的名单 */
+  .sn-drill{cursor:pointer;border-bottom:1px dashed currentColor;border-radius:3px;padding:0 2px}
+  .sn-drill:hover{background:var(--brand-soft)}
+  .sn-total.sn-drill{color:var(--brand)}
+  #saDrillTip{color:#2b8a3e;font-weight:600;font-size:12px}
   .sn-input{width:46px;font-size:13px;padding:1px 4px;border:1px solid var(--brand);border-radius:4px;background:#fff;color:var(--text)}
   .sn-input:focus{outline:none;border-color:var(--brand)}
   /* 分类维护面板 */
@@ -477,6 +499,17 @@
       <span class="cfg-sep"></span>
       <span class="cfg-label">标准周期（周期表未覆盖患者时使用，按数据中的品种自动生成，可直接修改；「按数量」= 该品种按「购药数量 × 周期」计算覆盖天数）</span>
       <span class="cycle-inputs" id="cycleInputs"></span>
+    </div>
+
+    <!-- 一句话筛选：把「本周还没买药的泰瑞沙」这类话翻译成下面的筛选条件（规则解析，不联网） -->
+    <div class="askbar" id="askBar">
+      <span class="ask-lbl">一句话筛选</span>
+      <input type="text" id="askInput" autocomplete="off"
+             placeholder="例如：本周还没买药的泰瑞沙 / 上周已回购 / 10月1日到10月20日 推迟购药 / 成都新都药房 已逾期">
+      <button class="btn sm" id="askBtn">筛选</button>
+      <button class="btn ghost sm" id="askClear">清空</button>
+      <div class="ask-res" id="askRes"></div>
+      <div class="ask-ex" id="askEx"></div>
     </div>
 
     <!-- 筛选区 + 脱敏/列显隐 -->
@@ -1586,6 +1619,8 @@ const state = {
   maskMode: "edge",   // 姓名/医生脱敏方式：first=保留首字、edge=保留首+末字、id=仅会员号、all=全部隐藏
   hiddenCols: new Set(),
   page: 1, pageSize: 50,
+  onlyMatched: false,  // 只看命中（一句话筛选后剔除未命中行；默认仍"变淡显示"保留上下文）
+  sig: "",             // 随访信号筛选：normal / nonstd（小结「下周预计复购/推迟」下钻用）
   // 整体小结：统计周期（默认跟随周视图；可勾选「自定义」指定起止日期）+ 选中品种 + 未购药原因分类树（可维护）
   periodType: "7d", periodStart: "", periodEnd: "",
   sumCustom: false, sumFrom: "", sumTo: "",
@@ -1594,7 +1629,7 @@ const state = {
   reasonTree: cloneReasonTree(DEFAULT_REASON_TREE), // 用户维护后的分类树（随快照保存）
   fuAdj: {},   // { [fam]: { [分类key]: n } } 小结人数人工修正（仅存用户改过的值；key=分类树叶子 key）
 };
-let SUMMARY = { text: "" }; // 当前整体小结文本（快照保存用）
+let SUMMARY = { text: "", fixMode: false }; // 当前整体小结文本（快照保存用）；fixMode=点数字为「改人数」
 let ALL_ROWS = [];          // 全量计算行（小结统计用，不随筛选变化）
 let DATA = { rows: [] };
 let CURRENT = { summary: null };
@@ -2004,7 +2039,8 @@ function filterRows(rows, opts) {
   const _skipCat = !!(opts && opts.skipCat);
   const _skipReasons = _skipCat || !!(opts && opts.skipReasons);
   if (!_skipCat && state.cats.size) rs = rs.filter(r => state.cats.has(r.status));
-  if (!_skipReasons && state.reasons.size) rs = rs.filter(r => r.reason && state.reasons.has(r.reason));
+  if (!_skipReasons && state.reasons.size) rs = rs.filter(r => (r.reason && state.reasons.has(r.reason)) || (!r.reason && state.reasons.has("__none")));
+  if (state.sig) rs = rs.filter(r => r.fu_signal_kind === state.sig);
   if (!_skipCat && state.repurParts.size) rs = rs.filter(r => r.repur_part && state.repurParts.has(r.repur_part));
   if (state.products.size) rs = rs.filter(r => state.products.has(r.product));
   if (state.hospitals.size) rs = rs.filter(r => state.hospitals.has(r.hospital || "未知"));
@@ -2013,7 +2049,7 @@ function filterRows(rows, opts) {
   if (state.q) {
     const ql = state.q.trim().toLowerCase();
     rs = rs.filter(r => {
-      for (const f of ["patient_name", "phone", "physician", "hospital", "pharmacy", "product", "executor"]) {
+      for (const f of ["patient_name", "phone", "member_id", "physician", "hospital", "pharmacy", "product", "executor"]) {
         if (r[f] && String(r[f]).toLowerCase().includes(ql)) return true;
       }
       return false;
@@ -2182,13 +2218,19 @@ const visibleCols = () => LIST_COLS.filter(([key]) => {
   return !state.hiddenCols.has(key);
 });
 
+// 表格数据源：默认「命中排前、未命中的变淡但仍显示」；「只看命中」时直接剔掉未命中
+function tableRows() {
+  if (!state.onlyMatched) return DATA.rows;
+  return DATA.rows.filter(r => !r._dim);
+}
 function renderTable() {
   const cols = visibleCols();
-  const total = DATA.rows.length;
+  const src = tableRows();
+  const total = src.length;
   const pages = Math.max(1, Math.ceil(total / state.pageSize));
   if (state.page > pages) state.page = pages;
   const start = (state.page - 1) * state.pageSize;
-  const rows = DATA.rows.slice(start, start + state.pageSize);
+  const rows = src.slice(start, start + state.pageSize);
   $("#thead").innerHTML = cols.map(([, label]) => `<th>${label}</th>`).join("");
   const tb = $("#tbody");
   if (!total) { tb.innerHTML = ""; $("#empty").classList.remove("hidden"); }
@@ -2579,7 +2621,7 @@ function reasonParts(st, fam) {
   for (const n of state.reasonTree) {
     if (n.children && n.children.length) {
       const subs = n.children.map(c => ({ key: c.key, label: c.label, n: v(c.key, st.cnt[c.key] || 0) }));
-      out.push({ cn: cn[idx] || (idx + "."), label: n.label, subs, total: subs.reduce((s, x) => s + x.n, 0) });
+      out.push({ cn: cn[idx] || (idx + "."), key: n.key, label: n.label, subs, total: subs.reduce((s, x) => s + x.n, 0) });
     } else {
       out.push({ cn: cn[idx] || (idx + "."), label: n.label, leaf: n.key, n: v(n.key, st.cnt[n.key] || 0) });
     }
@@ -2659,6 +2701,78 @@ function buildAllFamsSummaryText() {
   return out.join("\n").trim();
 }
 
+// 小结数字下钻：点一下 → 把表格筛成这批人（并自动「只看命中」）
+function drillSummary(t) {
+  const kind = t.dataset.drill || "";
+  const labelOf = k => reasonLabel(state.reasonTree, k) || k;
+  state.cats.clear(); state.reasons.clear(); state.repurParts.clear(); state.sig = "";
+  state.dateFrom = ""; state.dateTo = ""; state.dateField = "due";   // 清掉上一次「下周」下钻残留的日期区间
+  let tip = "";
+  if (kind === "due") { state.cats.add("应回购"); tip = "应回购"; }
+  else if (kind === "bought") { state.cats.add("应回购"); state.repurParts.add("应回已回"); tip = "应回已回"; }
+  else if (kind === "notBought") { state.cats.add("应回购"); state.repurParts.add("应回未回"); tip = "应回未回"; }
+  else if (kind === "unlabeled") { state.cats.add("应回购"); state.repurParts.add("应回未回"); state.reasons.add("__none"); tip = "应回未回 · 暂未标注原因"; }
+  else if (kind === "reason") {
+    state.cats.add("应回购"); state.repurParts.add("应回未回");
+    const rk = t.dataset.rk || "", scope = t.dataset.rs || "leaf";
+    if (scope === "group") {
+      const node = (state.reasonTree || []).find(n => n.key === rk);
+      if (node && node.children && node.children.length) {
+        node.children.forEach(c => state.reasons.add(c.key));
+        tip = node.label + "（" + node.children.map(c => c.label).join("/") + "）";
+      } else if (rk) { state.reasons.add(rk); tip = labelOf(rk); }
+    } else if (rk) { state.reasons.add(rk); tip = labelOf(rk); }
+  }
+  else if (kind === "next" || kind === "next_normal" || kind === "next_postpone") {
+    const W = getWeekRange("next");
+    state.dateFrom = W.start; state.dateTo = W.end; state.dateField = "due";
+    if (kind === "next_normal") { state.sig = "normal"; tip = "下周应购 · 随访判正常"; }
+    else if (kind === "next_postpone") { state.sig = "nonstd"; tip = "下周应购 · 随访判推迟"; }
+    else tip = "下周应购（" + W.start + " ~ " + W.end + "）";
+  }
+  state.onlyMatched = true;
+  state.page = 1;
+  refresh();
+  const wrap = document.querySelector(".tbl-wrap") || document.getElementById("thead");
+  if (wrap) wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+  flashDrillTip(tip + " → " + (DATA.matched || []).length + " 人");
+}
+
+// 下钻后的轻提示（5 秒自动消失）
+function flashDrillTip(txt) {
+  const el = $("#summaryAdjust");
+  if (!el) return;
+  let s = document.getElementById("saDrillTip");
+  if (!s) { s = document.createElement("span"); s.id = "saDrillTip"; el.appendChild(s); }
+  s.textContent = "　已筛选：" + txt;
+  clearTimeout(flashDrillTip._t);
+  flashDrillTip._t = setTimeout(() => { if (s.parentNode) s.parentNode.removeChild(s); }, 5000);
+}
+
+// 修正人数：小结数字原地变输入框（人工修正优先于自动统计，随快照保存）
+function editSummaryNumber(t, fam) {
+  const k = t.dataset.k;
+  if (!k) return;
+  const input = document.createElement("input");
+  input.type = "number"; input.min = "0"; input.className = "sn-input";
+  input.value = t.textContent.trim();
+  t.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return; done = true;
+    const n = Math.max(0, parseInt(input.value, 10) || 0);
+    (state.fuAdj[fam] = state.fuAdj[fam] || {})[k] = n;
+    renderSummaryPanel();
+  };
+  input.addEventListener("change", commit);
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") input.blur();
+    else if (ev.key === "Escape") { done = true; renderSummaryPanel(); }
+  });
+}
+
 // 渲染整体小结面板（周期/品种/文案/原因修正/复制）
 function renderSummaryPanel() {
   const panel = $("#summaryPanel");
@@ -2733,18 +2847,24 @@ function renderSummaryPanel() {
   const { text, st } = buildSummaryText(state.selFam);
   const wkLabel = R0.label;
   const fam = state.selFam;
-  const line1 = `${wkLabel}小结（${fam}）：\n1. ${wkLabel}应回购 ${st.due} 人（应回已回 ${st.bought} 人、应回未回 ${st.notBought} 人）；`;
+  const DT = ' title="点击查看这批人的名单"';
+  const line1 = `${esc(wkLabel)}小结（${esc(fam)}）：\n1. ${esc(wkLabel)}应回购 <span class="sn-total sn-drill" data-drill="due"${DT}>${st.due}</span> 人`
+    + `（应回已回 <span class="sn-num sn-drill" data-drill="bought"${DT}>${st.bought}</span> 人`
+    + `、应回未回 <span class="sn-num sn-drill" data-drill="notBought"${DT}>${st.notBought}</span> 人）；`;
   const line2 = reasonParts(st, fam).map(p =>
     p.subs
-      ? `${p.cn}${esc(p.label)}<span class="sn-total" title="由子类人数之和决定">${p.total}</span>人（${p.subs.map(x => `${esc(x.label)}<span class="sn-num" data-k="${esc(x.key)}" title="点击修改人数">${x.n}</span>`).join("/")}）`
-      : `${p.cn}${esc(p.label)}<span class="sn-num" data-k="${esc(p.leaf)}" title="点击修改人数">${p.n}</span>人`).join("、");
+      ? `${p.cn}${esc(p.label)}<span class="sn-total sn-drill" data-drill="reason" data-rk="${esc(p.key || "")}" data-rs="group"${DT}>${p.total}</span>人（`
+        + p.subs.map(x => `${esc(x.label)}<span class="sn-num sn-drill" data-drill="reason" data-k="${esc(x.key)}" data-rk="${esc(x.key)}" data-rs="leaf"${DT}>${x.n}</span>`).join("/")
+        + "）"
+      : `${p.cn}${esc(p.label)}<span class="sn-num sn-drill" data-drill="reason" data-k="${esc(p.leaf)}" data-rk="${esc(p.leaf)}" data-rs="leaf"${DT}>${p.n}</span>人`).join("、");
   const pReasons = st.postponeReasons.length ? `（${st.postponeReasons.slice(0, 5).map(esc).join("、")}）` : "";
-  // 下周预计：复购总数（=正常+推迟）不可编辑，正常/推迟数字可点击修改
   const adj4 = state.fuAdj[fam] || {};
   const v4 = (k, auto) => (adj4[k] != null ? adj4[k] : auto);
   const nNormal = v4("next_normal", st.normal);
   const nPostpone = v4("next_postpone", st.postpone);
-  const line3 = `3. 下周预计复购 <span class="sn-total" title="由正常+推迟之和决定">${nNormal + nPostpone}</span> 人，预计正常回购 <span class="sn-num" data-k="next_normal" title="点击修改人数">${nNormal}</span> 人，推迟 <span class="sn-num" data-k="next_postpone" title="点击修改人数">${nPostpone}</span> 人${pReasons}`;
+  const line3 = `3. 下周预计复购 <span class="sn-total sn-drill" data-drill="next"${DT}>${nNormal + nPostpone}</span> 人`
+    + `，预计正常回购 <span class="sn-num sn-drill" data-drill="next_normal" data-k="next_normal"${DT}>${nNormal}</span> 人`
+    + `，推迟 <span class="sn-num sn-drill" data-drill="next_postpone" data-k="next_postpone"${DT}>${nPostpone}</span> 人${pReasons}`;
   const unlabeled = Math.max(0, st.notBought - (st.notBoughtLabeled || 0));
   // 口径说明行：期末之后才补购的人仍算「当时未回」，但要讲清楚现在已回来几个（否则事后回看会以为数字变了）
   let line4 = "";
@@ -2753,37 +2873,24 @@ function renderSummaryPanel() {
     line4 = `\n<span style="color:#6b7280;font-size:12px">4. 口径说明：本表按 ${esc(String(st.end))} 当日的购药数据回溯（不受期末之后补购影响）；上述应回未回 ${st.notBought} 人中 ${st.lateBack} 人已在 ${esc(rg)} 补购，截至数据日实际仍未购 ${st.stillOut} 人。</span>`;
   }
   $("#summaryText").innerHTML =
-    esc(line1) + "\n2. 未购药原因（应回未回 " + st.notBought + " 人）：" + line2 +
-    (unlabeled ? `<span class="sn-miss">；另 ${unlabeled} 人暂未标注</span>` : "") + "；\n" + line3 + line4;
-  // 点击数字 → 原地变输入框，回车/失焦保存（Esc 取消）
+    line1 + "\n2. 未购药原因（应回未回 " + st.notBought + " 人）：" + line2 +
+    (unlabeled ? `；另 <span class="sn-drill" data-drill="unlabeled"${DT}>${unlabeled}</span> 人暂未标注` : "") + "；\n" + line3 + line4;
+  // 点击数字：默认「看这批人的名单」；开「修正人数」后才是原地改人数（人工修正优先于自动统计）
   $("#summaryText").onclick = (e) => {
     if (SNAP_MODE) return;
-    const t = e.target.closest(".sn-num");
+    const t = e.target.closest(".sn-drill");
     if (!t) return;
-    const k = t.dataset.k;
-    const input = document.createElement("input");
-    input.type = "number"; input.min = "0"; input.className = "sn-input";
-    input.value = t.textContent.trim();
-    t.replaceWith(input);
-    input.focus(); input.select();
-    let done = false;
-    const commit = () => {
-      if (done) return; done = true;
-      const n = Math.max(0, parseInt(input.value, 10) || 0);
-      (state.fuAdj[fam] = state.fuAdj[fam] || {})[k] = n;
-      renderSummaryPanel();
-    };
-    input.addEventListener("change", commit);
-    input.addEventListener("blur", commit);
-    input.addEventListener("keydown", ev => {
-      if (ev.key === "Enter") input.blur();
-      else if (ev.key === "Escape") { done = true; renderSummaryPanel(); }
-    });
+    if (SUMMARY.fixMode && t.dataset.k) { editSummaryNumber(t, fam); return; }
+    drillSummary(t);
   };
-  // 提示条
+  // 提示条：模式开关
   $("#summaryAdjust").innerHTML =
-    '<span class="sa-lbl">💡 小结中<span class="sa-blue">蓝色</span>的数字可直接点击修改（人工修正优先于自动统计，随快照保存）</span>';
+    '<span class="sa-lbl">💡 点<span class="sa-blue">蓝色数字</span>＝直接看这批人的名单；要改人数先开</span>'
+    + `<button class="btn ghost sm" id="saFixBtn" style="font-size:12px;padding:1px 8px;margin-left:6px">${SUMMARY.fixMode ? "退出修正人数" : "修正人数"}</button>`
+    + `<span class="sa-lbl" id="saFixHint">${SUMMARY.fixMode ? "（现在点数字＝改人数，再点一次退出）" : ""}</span>`;
   $("#summaryAdjust").classList.toggle("hidden", SNAP_MODE);
+  const fixBtn = $("#saFixBtn");
+  if (fixBtn) fixBtn.onclick = () => { SUMMARY.fixMode = !SUMMARY.fixMode; renderSummaryPanel(); };
   // 管理分类（维护小结分类树；未购药原因列选项跟随）
   const mgrBtn = $("#manageReasonBtn");
   if (SNAP_MODE) mgrBtn.classList.add("hidden");
@@ -2936,6 +3043,7 @@ async function refresh() {
   renderSummaryPanel();
   renderCycleCfg();
   renderWeekBar();
+  if (typeof refreshAskExamples === "function") refreshAskExamples();  // 示例跟着数据里的品种/药房变
 }
 
 /* ============ 上传 / 分析（统一上传 → 列表确认/删除 → 开始分析后保留） ============ */
@@ -3157,7 +3265,7 @@ $("#clearAllBtn").onclick = () => {
 
 /* ============ 筛选交互 ============ */
 $("#clearBtn").onclick = () => {
-  state.cats.clear(); state.reasons.clear(); state.repurParts.clear(); state.products.clear(); state.hospitals.clear(); state.pharmacies.clear(); state.executors.clear();
+  state.cats.clear(); state.reasons.clear(); state.repurParts.clear(); state.sig = ""; state.products.clear(); state.hospitals.clear(); state.pharmacies.clear(); state.executors.clear();
   state.weekSel = "this"; state.refDate = "";
   state.q = "";
   state.dateFrom = ""; state.dateTo = ""; state.dateField = "due";
@@ -4179,7 +4287,328 @@ const TOUR_STEPS = {
   }
 })();
 
-window.AppCore = { loadSnapshot, buildRows, filterRows, buildSummary, doExport, doExportCallback, callbackRows, applyCallbackRecords, reasonKeyFromLabel, disp, payKind, qtyNum, qtyScales, coverDays, addDays, normalizePurchases, stockEndAfter, renderCycleCfg, LIST_COLS, STORE, state, DATA, refresh, ensureStdCycles, renderCycleInputs, renderTable, renderPagination, buildSummaryStats, buildSummaryText, buildAllFamsSummaryText, renderSummaryPanel, getWeekRange, renderWeekBar, refToday, WEEK_LABEL, classifyFuReason: M.classifyFuReason, DEFAULT_REASON_TREE, cloneReasonTree, flattenReasonTree, reasonLabel, renderReasonManager, addReason, addReasonChild, renameReason, removeReason, showUpdateModal, UPDATE_LOG, APP_VERSION_LABEL };
+/* ============ 一句话筛选（规则解析，不接 AI / 不联网） ============
+   把「本周还没买药的泰瑞沙患者」这类话翻译成现有筛选条件：
+   时间（周/月/近N天/显式区间）→ weekSel 或 dateFrom~dateTo
+   状态词 → state.cats / state.repurParts；原因词 → state.reasons（叶子 key）
+   品种 / 药房 / 医院 / 患者（电话·会员号·姓名）→ products / pharmacies / hospitals / q
+   解析不出来的剩余文字在回显里点出来，避免"悄悄筛错"。 */
+
+const ASK_EXAMPLES = [
+  "本周还没买药的泰瑞沙患者",
+  "上周已回购的",
+  "长期未购（超过90天没买）",
+  "10月1日到10月20日 推迟购药",
+  "本周已逾期 超过30天",
+  "找患者：13900000000",
+];
+// 示例按当前数据动态生成（品种/药房取自实际数据，避免"示例里的店你没有"）
+function askExamples() {
+  const prods = [...new Set((ALL_ROWS || []).map(r => r.product).filter(Boolean))];
+  const phs = [...new Set((ALL_ROWS || []).map(r => r.pharmacy).filter(Boolean))];
+  const fam = prods[0] || "泰瑞沙";
+  const out = ["本周还没买药的" + fam + "患者", "上周已回购的", "长期未购（超过90天没买）", "10月1日到10月20日 推迟购药"];
+  if (phs[0]) out.push(phs[0] + " 应回未回");
+  out.push("找患者：13900000000");
+  return out;
+}
+// 示例 chips：内容变了才重绘（避免刷新闪烁）
+function refreshAskExamples() {
+  const ex = $("#askEx");
+  if (!ex) return;
+  const list = askExamples();
+  const key = list.join("|");
+  if (ex.dataset.key === key) return;
+  ex.dataset.key = key;
+  ex.innerHTML = list.map(t => `<span class="chip" data-q="${esc(t)}">${esc(t)}</span>`).join("");
+}
+
+const _askP2 = n => String(n).padStart(2, "0");
+const _askLastDay = (y, m) => new Date(y, m, 0).getDate();
+function _askValid(y, m, d) {
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return "";
+  return y + "-" + _askP2(m) + "-" + _askP2(d);
+}
+function _askFullDate(s) {
+  const m = String(s).match(/(\d{4})\s*[-.\/年]\s*(\d{1,2})\s*[-.\/月]\s*(\d{1,2})/);
+  return m ? _askValid(+m[1], +m[2], +m[3]) : "";
+}
+function _askMonthDay(s, baseY) {
+  const m = String(s).match(/(\d{1,2})\s*[.\/月]\s*(\d{1,2})/);
+  return m ? _askValid(baseY, +m[1], +m[2]) : "";
+}
+
+// 时间：显式区间优先；否则相对周（切周视图，状态口径随之对齐）/ 月 / 近 N 天
+function _askParseTime(text) {
+  const baseY = Number(refToday().slice(0, 4));
+  const sep = "(?:\\s*(?:到|至|~|～|—|－)\\s*|\\s+-\\s+)";
+  const tok = "(\\d{4}\\s*[-.\\/年]\\s*\\d{1,2}\\s*[-.\\/月]\\s*\\d{1,2}|\\d{1,2}\\s*[.\\/月]\\s*\\d{1,2}\\s*[日号]?)";
+  const mr = text.match(new RegExp(tok + sep + tok));
+  if (mr) {
+    const a = _askFullDate(mr[1]) || _askMonthDay(mr[1], baseY);
+    const b = _askFullDate(mr[2]) || _askMonthDay(mr[2], baseY);
+    if (a && b) {
+      const from = a <= b ? a : b, to = a <= b ? b : a;
+      return { from, to, raw: mr[0], label: from + " ~ " + to };
+    }
+  }
+  const one = text.match(new RegExp(tok));
+  if (one) {
+    const d = _askFullDate(one[1]) || _askMonthDay(one[1], baseY);
+    if (d) return { from: d, to: d, raw: one[0], label: d };
+  }
+  const W = { this: getWeekRange("this"), last: getWeekRange("last"), next: getWeekRange("next") };
+  let m;
+  if ((m = text.match(/下周|下星期|下礼拜/))) return { weekSel: "next", ...W.next, raw: m[0], label: "下周" };
+  if ((m = text.match(/上周|上个?星期|上礼拜|上一周/))) return { weekSel: "last", ...W.last, raw: m[0], label: "上周" };
+  if ((m = text.match(/本周|这周|这一周|这个?星期|当周/))) return { weekSel: "this", ...W.this, raw: m[0], label: "本周" };
+  const t = refToday(), Y = +t.slice(0, 4), M = +t.slice(5, 7);
+  if ((m = text.match(/上个月|上月/))) {
+    const m2 = M === 1 ? 12 : M - 1, y2 = M === 1 ? Y - 1 : Y;
+    return { from: y2 + "-" + _askP2(m2) + "-01", to: y2 + "-" + _askP2(m2) + "-" + _askLastDay(y2, m2), raw: m[0], label: "上月" };
+  }
+  if ((m = text.match(/本月|这个月|当月/))) {
+    return { from: Y + "-" + _askP2(M) + "-01", to: Y + "-" + _askP2(M) + "-" + _askLastDay(Y, M), raw: m[0], label: "本月" };
+  }
+  if ((m = text.match(/近\s*(\d+)\s*天|最近\s*(\d+)\s*天/))) {
+    const n = Number(m[1] || m[2]) || 7;
+    return { from: addDays(refToday(), -(n - 1)), to: refToday(), raw: m[0], label: "近" + n + "天" };
+  }
+  if ((m = text.match(/近\s*一?\s*周|最近\s*一?\s*周|近7天/))) return { from: addDays(refToday(), -6), to: refToday(), raw: m[0], label: "近7天" };
+  if ((m = text.match(/近\s*一?\s*个?\s*月|最近\s*一?\s*个?\s*月|近30天/))) return { from: addDays(refToday(), -29), to: refToday(), raw: m[0], label: "近30天" };
+  if ((m = text.match(/今天|今日/))) return { from: refToday(), to: refToday(), raw: m[0], label: "今天" };
+  if ((m = text.match(/昨天|昨日/))) { const d = addDays(refToday(), -1); return { from: d, to: d, raw: m[0], label: "昨天" }; }
+  if ((m = text.match(/前天/))) { const d = addDays(refToday(), -2); return { from: d, to: d, raw: m[0], label: "前天" }; }
+  return null;
+}
+
+// 原因：先按（可自定义的）分类树 label 匹配，再按同义词映射到 key（只保留树里存在的叶子）
+const ASK_REASON_SYN = [
+  [/推迟|延迟|延后|晚点买|过几天买|还没来买|过几天再来/, ["delay"]],
+  [/挂号|已预约|预约到院|预约了/, ["appointed"]],
+  [/延长周期|延长用药|减少剂量|减量|调周期/, ["prolong_doctor", "prolong_self"]],
+  [/医嘱/, ["prolong_doctor"]],
+  [/自行|自主|自己减|自己延/, ["prolong_self"]],
+  [/换药|换方案|耐药|进展|换治疗/, ["dropout_switch"]],
+  [/经济|负担|没钱|自费贵/, ["dropout_econ"]],
+  [/去世|死亡|离世|过世/, ["dropout_death"]],
+  [/脱落|停药|不治了|放弃治疗/, ["dropout_switch", "dropout_econ", "dropout_death", "dropout_other"]],
+  [/转渠道|换药房|转院|转本地|其他渠道|去别家|不在我们店/, ["channel"]],
+  [/随访失败|联系不上|打不通|关机|停机|拒访|拒绝随访|没接电话|失联/, ["fuFail"]],
+];
+function _askParseReasons(text) {
+  const tree = state.reasonTree || [];
+  const leafKeys = new Set();
+  tree.forEach(n => {
+    if (n.children && n.children.length) n.children.forEach(c => leafKeys.add(c.key));
+    else leafKeys.add(n.key);
+  });
+  const out = new Set(), used = [];
+  tree.forEach(n => {
+    if (n.children && n.children.length) {
+      if (text.includes(n.label)) { used.push(n.label); n.children.forEach(c => out.add(c.key)); }
+      else n.children.forEach(c => { if (c.label && c.label.length >= 2 && text.includes(c.label)) { used.push(c.label); out.add(c.key); } });
+    } else if (n.label && text.includes(n.label)) { used.push(n.label); out.add(n.key); }
+  });
+  ASK_REASON_SYN.forEach(([re, keys]) => {
+    const m = text.match(re);
+    if (m) { used.push(m[0]); keys.forEach(k => { if (leafKeys.has(k)) out.add(k); }); }
+  });
+  return { keys: [...out], used };
+}
+
+// 状态词 → 主状态 + 应回购细分（顺序敏感：先判更具体的）
+const ASK_STATUS = [
+  { re: /长期未购|长期没买|很久没买|长期未买|好几个月没买/, cats: ["长期未购"] },
+  { re: /已结案|结案|脱落|停药|不治了/, cats: ["已结案"] },
+  { re: /未到期|还没到期|没到日子/, cats: ["未到期"] },
+  { re: /已逾期|逾期|超期|过了应购日|过期没买/, cats: ["已逾期"] },
+  { re: /没买|未买|没购|未购|未回|没回|还没买|没来买|应购未购|应回未回|未回购/, cats: ["应回购"], parts: ["应回未回"] },
+  { re: /已回|已购|已买|回购了|买过了|已经买|回来买/, cats: ["应回购"], parts: ["应回已回"] },
+];
+
+// 名称匹配：先看是否直接出现；再看「XX药房 / XX医院」里的前缀（支持「成都的药房」）
+function _askByName(text, values, suffixRe) {
+  const out = new Set();
+  const list = [...new Set((values || []).filter(Boolean))];
+  list.forEach(v => { if (text.includes(v)) out.add(v); });
+  const re = new RegExp("([\\u4e00-\\u9fa5]{2,8})\\s*(?:" + suffixRe + ")", "g");
+  let m;
+  while ((m = re.exec(text))) {
+    let w = m[1].replace(/的$/, "").replace(/^(查|看|筛|找|所有|全部|在|那家|这家)/, "");
+    if (w.length < 2) continue;
+    list.forEach(v => { if (v.replace(new RegExp(suffixRe, "g"), "").includes(w)) out.add(v); });
+  }
+  return [...out];
+}
+
+function parseAsk(raw) {
+  const text = String(raw || "").trim();
+  const p = { text, dateFrom: "", dateTo: "", dateField: "due", weekSel: null, timeLabel: "",
+    cats: [], parts: [], reasons: [], products: [], pharmacies: [], hospitals: [], q: "",
+    used: [], unknown: [], notes: [] };
+  if (!text) return p;
+
+  // 按应购日 / 购药日
+  let m0;
+  if ((m0 = text.match(/购药日|买药日|购买日|按购药/))) { p.dateField = "purchase"; p.used.push(m0[0]); }
+  else if ((m0 = text.match(/应购日|应购药日|按应购/))) { p.used.push(m0[0]); }
+
+  // 时间
+  const t = _askParseTime(text);
+  if (t) {
+    p.used.push(t.raw);
+    if (t.weekSel) { p.weekSel = t.weekSel; p.timeLabel = t.label; }
+    else { p.dateFrom = t.from; p.dateTo = t.to; p.timeLabel = t.label + "（按" + (p.dateField === "purchase" ? "购药日" : "应购日") + "）"; }
+  }
+
+  // 状态：所有命中的都记为「已消费」（避免回显里冒出"没买药"这种噪音）；但只让**第一个**真正设条件
+  // （数组按「具体→通用」排序，状态互斥：「长期未购」不应再被「未购」叠成应回购）
+  const mOver = text.match(/超过\s*(\d+)\s*天/);
+  let stateSet = false;
+  if (mOver) {
+    p.used.push(mOver[0]);
+    const n = Number(mOver[1]) || 0;
+    if (n >= 90) { p.cats.push("长期未购"); stateSet = true; }
+    else if (n > 0) { p.cats.push("已逾期"); stateSet = true; }
+  }
+  for (const s of ASK_STATUS) {
+    const m = text.match(s.re);
+    if (!m) continue;
+    p.used.push(m[0]);
+    if (stateSet) continue;
+    (s.cats || []).forEach(c => { if (!p.cats.includes(c)) p.cats.push(c); });
+    (s.parts || []).forEach(x => { if (!p.parts.includes(x)) p.parts.push(x); });
+    stateSet = true;
+  }
+
+  // 原因
+  const r = _askParseReasons(text);
+  p.reasons = r.keys;
+  p.used.push(...r.used);
+
+  // 品种 / 药房 / 医院
+  const prods = [...new Set(ALL_ROWS.map(x => x.product).filter(Boolean))].sort((a, b) => b.length - a.length);
+  const pm = prods.filter(x => text.includes(x));
+  if (pm.length) { p.products = pm; p.used.push(...pm); }
+  p.pharmacies = _askByName(text, ALL_ROWS.map(x => x.pharmacy), "药房|药店");
+  p.hospitals = _askByName(text, ALL_ROWS.map(x => x.hospital), "医院");
+  p.used.push(...p.pharmacies, ...p.hospitals);
+
+  // 患者：手机号 > 会员号 > 姓名
+  const phone = (text.match(/1\d{10}/) || [])[0];
+  const mem = (text.match(/(?:会员号?|会员\s*ID)\s*[:：]?\s*(\d{5,10})/i) || [])[1];
+  const nm = (text.match(/(?:患者|病人|找|叫|名为)\s*[:：]?\s*([\u4e00-\u9fa5]{2,4})/) || [])[1];
+  if (phone) { p.q = phone; p.used.push(phone); }
+  else if (mem) { p.q = mem; p.used.push(mem); }
+  else if (nm) { p.q = nm; p.used.push(nm); }
+
+  // 剩余文字：算「没看懂」
+  let rest = text;
+  [...new Set(p.used)].filter(Boolean).sort((a, b) => b.length - a.length).forEach(u => { rest = rest.split(u).join(" "); });
+  rest = rest.replace(/[，,。.、;；:：!！?？\s]/g, "");
+  // 括号里的补充说明（如「（超过90天没买）」）已由上面的规则解析过，别再当成"没看懂"
+  rest = rest.replace(/[（(][^）)]{0,16}[）)]/g, "");
+  const STOP = /^(帮我|请|查一下|查|看|筛选|筛|一下|所有|全部|那些|这些|有哪些|哪些|的|了|和|与|及|以及|患者|病人|情况|名单|记录|数据|个|人|吗|呢|啊|吧|在|是|有|还|都|就|要|想|给我|看看|显示|出来|找患者|找病人|查患者|查病人)$/;
+  rest.split(/(?:的|了|和|与|以及|那些|这些|所有|全部)/).forEach(frag => {
+    const f = frag.trim();
+    if (f.length >= 2 && !STOP.test(f) && !/^\d+$/.test(f)) p.unknown.push(f);
+  });
+
+  if (!p.weekSel && !p.dateFrom && (p.parts.length || p.cats.includes("应回购"))) {
+    p.notes.push("没提到时间，按当前「" + (WEEK_LABEL[state.weekSel] || "本周") + "」视图筛");
+  }
+  if (p.dateFrom && p.parts.length) {
+    p.notes.push("显式日期区间下，应回已回/未回仍按当前周口径判断，跨周可能不准；要看整周建议说「上周/本周」");
+  }
+  return p;
+}
+
+function applyAsk(p) {
+  state.cats.clear(); state.reasons.clear(); state.repurParts.clear(); state.sig = "";
+  state.products.clear(); state.hospitals.clear(); state.pharmacies.clear(); state.executors.clear();
+  state.q = p.q || "";
+  state.dateField = p.dateField || "due";
+  if (p.weekSel) { state.weekSel = p.weekSel; state.dateFrom = ""; state.dateTo = ""; }
+  else { state.dateFrom = p.dateFrom || ""; state.dateTo = p.dateTo || ""; }
+  (p.cats || []).forEach(x => state.cats.add(x));
+  (p.parts || []).forEach(x => state.repurParts.add(x));
+  (p.reasons || []).forEach(x => state.reasons.add(x));
+  (p.products || []).forEach(x => state.products.add(x));
+  (p.hospitals || []).forEach(x => state.hospitals.add(x));
+  (p.pharmacies || []).forEach(x => state.pharmacies.add(x));
+  state.page = 1;
+  refresh();
+  // 同步上方原有控件，避免"看着没筛但结果变了"
+  const si = $("#searchInput"); if (si) si.value = state.q;
+  const df = $("#dateField"); if (df) df.value = state.dateField;
+  const f = $("#dateFrom"); if (f) f.value = state.dateFrom;
+  const tt = $("#dateTo"); if (tt) tt.value = state.dateTo;
+  document.querySelectorAll(".wk-btn").forEach(b => b.classList.toggle("active", b.dataset.wk === state.weekSel));
+  refreshAskExamples();                 // 数据就绪后，示例改成"你这份数据里的品种/药房"
+  return (DATA.matched || []).length;   // 命中集（表格里命中排前、未命中的变淡但仍在）
+}
+
+function askExplain(p, n) {
+  const bits = [];
+  if (p.timeLabel) bits.push(p.timeLabel);
+  if (p.cats.length) bits.push(p.cats.join(" / "));
+  if (p.parts.length) bits.push(p.parts.join(" / "));
+  if (p.reasons.length) bits.push("原因：" + p.reasons.map(k => reasonLabel(state.reasonTree, k) || k).join("、"));
+  if (p.products.length) bits.push("品种：" + p.products.join("、"));
+  if (p.pharmacies.length) bits.push("药房：" + p.pharmacies.join("、"));
+  if (p.hospitals.length) bits.push("医院：" + p.hospitals.join("、"));
+  if (p.q) bits.push("关键词：" + p.q);
+  let html = "已筛选：" + (bits.length ? bits.join(" ｜ ") : "（无条件，全部）") + " → <b>" + n + " 人</b>";
+  if (n) html += `　<button class="btn ghost sm" id="askOnlyBtn" style="font-size:12px;padding:2px 8px">${state.onlyMatched ? "显示全部（含未命中）" : "只看命中"}</button>`;
+  if (p.unknown.length) html += `<br><span class="warn">没看懂：${esc(p.unknown.join("、"))}（未参与筛选；可换个说法，或直接用右侧筛选）</span>`;
+  if (p.notes.length) html += `<br><span style="color:#8a6d3b">提示：${esc(p.notes.join("；"))}</span>`;
+  return html;
+}
+
+(function bindAskBar() {
+  const bar = $("#askBar");
+  if (!bar) return;
+  if (SNAP_MODE) { bar.classList.add("hidden"); return; }
+  const inp = $("#askInput"), btn = $("#askBtn"), clr = $("#askClear"), res = $("#askRes"), ex = $("#askEx");
+  refreshAskExamples();
+  ex.onmouseenter = refreshAskExamples;
+  const run = () => {
+    const p = parseAsk(inp.value);
+    if (!p.text) { res.classList.remove("on"); return; }
+    const n = applyAsk(p);
+    res.innerHTML = askExplain(p, n);
+    res.classList.add("on");
+    const ob = document.getElementById("askOnlyBtn");
+    if (ob) ob.onclick = () => {
+      state.onlyMatched = !state.onlyMatched;
+      state.page = 1;
+      refresh();
+      res.innerHTML = askExplain(p, (DATA.matched || []).length);
+      res.classList.add("on");
+      const ob2 = document.getElementById("askOnlyBtn");
+      if (ob2) ob2.onclick = ob.onclick;
+    };
+  };
+  btn.onclick = run;
+  inp.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); run(); } };
+  ex.onclick = e => { const c = e.target.closest(".chip"); if (!c) return; inp.value = c.dataset.q || ""; run(); };
+  clr.onclick = () => {
+    inp.value = "";
+    state.cats.clear(); state.reasons.clear(); state.repurParts.clear(); state.sig = "";
+    state.products.clear(); state.hospitals.clear(); state.pharmacies.clear(); state.executors.clear();
+    state.q = ""; state.dateFrom = ""; state.dateTo = "";
+    state.onlyMatched = false;
+    state.page = 1; refresh();
+    const si = $("#searchInput"); if (si) si.value = "";
+    const f = $("#dateFrom"); if (f) f.value = "";
+    const t = $("#dateTo"); if (t) t.value = "";
+    res.classList.remove("on"); res.innerHTML = "";
+  };
+})();
+
+window.AppCore = { loadSnapshot, buildRows, filterRows, buildSummary, doExport, doExportCallback, callbackRows, applyCallbackRecords, reasonKeyFromLabel, disp, payKind, qtyNum, qtyScales, coverDays, addDays, normalizePurchases, stockEndAfter, renderCycleCfg, LIST_COLS, STORE, state, DATA, refresh, ensureStdCycles, renderCycleInputs, renderTable, renderPagination, buildSummaryStats, buildSummaryText, buildAllFamsSummaryText, renderSummaryPanel, getWeekRange, renderWeekBar, refToday, WEEK_LABEL, classifyFuReason: M.classifyFuReason, DEFAULT_REASON_TREE, cloneReasonTree, flattenReasonTree, reasonLabel, renderReasonManager, addReason, addReasonChild, renameReason, removeReason, showUpdateModal, UPDATE_LOG, APP_VERSION_LABEL, parseAsk, applyAsk };
 })();
 
 </script>
